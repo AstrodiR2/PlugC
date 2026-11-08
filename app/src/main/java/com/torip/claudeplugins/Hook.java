@@ -1,19 +1,13 @@
 package com.torip.claudeplugins;
 
 import android.app.Activity;
-import android.graphics.Color;
-import android.graphics.drawable.GradientDrawable;
-import android.os.Handler;
-import android.os.Looper;
-import android.os.SystemClock;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.FrameLayout;
-import android.widget.TextView;
+import android.widget.Toast;
 
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -24,18 +18,16 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class Hook implements IXposedHookLoadPackage {
     private static final String TAG = "ClaudePlugins: ";
     private static final String PKG = "com.anthropic.claude";
-    private static final long NEW_ENTRY_GAP_MS = 1500;
-    private static final long SHOW_MS = 2500;
 
     private static volatile WeakReference<Activity> activity = new WeakReference<>(null);
-    private static Handler ui = null;
-    private static long lastSeen = 0;
-    private static View badge = null;
+    private static Object fakeItem = null;
+    private static Object unit = null;
+    private static boolean failed = false;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
-        XposedBridge.log(TAG + "stage1 loaded, process=" + lpp.processName);
+        XposedBridge.log(TAG + "v4 loaded");
         hookActivity(lpp.classLoader);
         hookItem(lpp.classLoader);
     }
@@ -54,21 +46,18 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    private void hookItem(ClassLoader cl) {
+    private void hookItem(final ClassLoader cl) {
         try {
             Class<?> c = XposedHelpers.findClass("com.anthropic.claude.settings.q", cl);
-            Method[] ms = c.getDeclaredMethods();
-            XposedBridge.log(TAG + "v3 q methods: " + ms.length);
             int n = 0;
-            for (Method m : ms) {
+            for (final Method m : c.getDeclaredMethods()) {
                 Class<?>[] pt = m.getParameterTypes();
-                XposedBridge.log(TAG + "q." + m.getName() + " argc=" + pt.length
-                        + " arg0=" + (pt.length > 0 ? pt[0].getName() : "-"));
                 if (m.getName().equals("c") && pt.length == 8 && pt[0].getName().endsWith("m090")) {
+                    m.setAccessible(true);
                     XposedBridge.hookMethod(m, new XC_MethodHook() {
                         @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            onItem(p.args[0]);
+                        protected void afterHookedMethod(MethodHookParam p) {
+                            onItem(m, p.args, cl);
                         }
                     });
                     n++;
@@ -80,60 +69,81 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void onItem(Object item) {
+    private static void onItem(Method m, Object[] orig, ClassLoader cl) {
+        if (failed) return;
         try {
-            long now = SystemClock.uptimeMillis();
-            boolean fresh = now - lastSeen > NEW_ENTRY_GAP_MS;
-            lastSeen = now;
-            String name = item instanceof Enum ? ((Enum<?>) item).name() : "?";
-            if (fresh) {
-                XposedBridge.log(TAG + "settings entry, first item=" + name);
-                showBadge();
-            }
+            Object item = orig[0];
+            if (!(item instanceof Enum) || !"Billing".equals(((Enum<?>) item).name())) return;
+
+            if (fakeItem == null) fakeItem = makeFake(item);
+            if (unit == null) unit = findUnit(cl);
+
+            Object[] a = orig.clone();
+            a[0] = fakeItem;
+            a[2] = wrapClick(m.getParameterTypes()[2], orig[2]);
+            a[3] = null;
+            a[4] = "Плагины";
+            a[6] = 0;
+            a[7] = 8;
+            XposedBridge.invokeOriginalMethod(m, null, a);
         } catch (Throwable t) {
-            XposedBridge.log(TAG + "onItem: " + t);
+            failed = true;
+            XposedBridge.log(TAG + "inject failed: " + t + " / " + t.getCause());
         }
     }
 
-    private static void showBadge() {
-        final Activity a = activity.get();
-        if (a == null) return;
-        a.runOnUiThread(() -> {
-            try {
-                hideBadge();
-                TextView tv = new TextView(a);
-                tv.setText("Работает");
-                tv.setTextColor(Color.parseColor("#1A1A1A"));
-                tv.setTextSize(14);
-                tv.setTypeface(null, android.graphics.Typeface.BOLD);
-                float d = a.getResources().getDisplayMetrics().density;
-                tv.setPadding((int) (16 * d), (int) (8 * d), (int) (16 * d), (int) (8 * d));
-                GradientDrawable bg = new GradientDrawable(
-                        GradientDrawable.Orientation.LEFT_RIGHT,
-                        new int[]{Color.parseColor("#E5E4E2"), Color.parseColor("#B8B8BC"), Color.parseColor("#F4F4F6")});
-                bg.setCornerRadius(100 * d);
-                tv.setBackground(bg);
-                tv.setElevation(8 * d);
-
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                        Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-                lp.topMargin = (int) (72 * d);
-
-                ((ViewGroup) a.getWindow().getDecorView()).addView(tv, lp);
-                badge = tv;
-                if (ui == null) ui = new Handler(Looper.getMainLooper()); ui.postDelayed(Hook::hideBadge, SHOW_MS);
-            } catch (Throwable t) {
-                XposedBridge.log(TAG + "showBadge: " + t);
-            }
-        });
+    private static Object makeFake(Object billing) throws Throwable {
+        Class<?> uc = Class.forName("sun.misc.Unsafe");
+        Field f = uc.getDeclaredField("theUnsafe");
+        f.setAccessible(true);
+        Object u = f.get(null);
+        Method alloc = uc.getMethod("allocateInstance", Class.class);
+        Object fake = alloc.invoke(u, billing.getClass());
+        XposedHelpers.setObjectField(fake, "name", "Plugins");
+        XposedHelpers.setIntField(fake, "ordinal", ((Enum<?>) billing).ordinal());
+        XposedHelpers.setObjectField(fake, "v", XposedHelpers.getObjectField(billing, "v"));
+        XposedHelpers.setIntField(fake, "w", XposedHelpers.getIntField(billing, "w"));
+        XposedHelpers.setObjectField(fake, "x", null);
+        XposedBridge.log(TAG + "fake item created");
+        return fake;
     }
 
-    private static void hideBadge() {
-        View b = badge;
-        badge = null;
-        if (b != null && b.getParent() instanceof ViewGroup) {
-            ((ViewGroup) b.getParent()).removeView(b);
+    private static Object findUnit(ClassLoader cl) {
+        try {
+            Class<?> k = Class.forName("kotlin.Unit", false, cl);
+            return k.getField("INSTANCE").get(null);
+        } catch (Throwable t) {
+            return null;
         }
+    }
+
+    private static Object wrapClick(Class<?> type, Object original) {
+        if (!type.isInterface()) {
+            XposedBridge.log(TAG + "click type not interface: " + type.getName());
+            return original;
+        }
+        return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        if (method.getDeclaringClass() == Object.class) {
+                            switch (method.getName()) {
+                                case "hashCode": return System.identityHashCode(proxy);
+                                case "equals": return proxy == args[0];
+                                default: return "PluginsClick";
+                            }
+                        }
+                        final Activity a = activity.get();
+                        if (a != null) {
+                            a.runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    Toast.makeText(a, "Плагины", Toast.LENGTH_SHORT).show();
+                                }
+                            });
+                        }
+                        return unit;
+                    }
+                });
     }
 }
