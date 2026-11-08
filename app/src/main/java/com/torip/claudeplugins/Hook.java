@@ -1,6 +1,7 @@
 package com.torip.claudeplugins;
 
 import android.app.Activity;
+import android.content.Intent;
 
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
@@ -28,9 +29,10 @@ public class Hook implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
         appCl = lpp.classLoader;
-        XposedBridge.log(TAG + "v11 loaded");
+        XposedBridge.log(TAG + "v12 loaded");
         hookActivity();
         hookItem();
+        hookResult();
     }
 
     private void hookActivity() {
@@ -44,6 +46,26 @@ public class Hook implements IXposedHookLoadPackage {
             });
         } catch (Throwable t) {
             XposedBridge.log(TAG + "activity hook failed: " + t);
+        }
+    }
+
+    private void hookResult() {
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onActivityResult",
+                    int.class, int.class, Intent.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            try {
+                                PluginsUi.onResult((Activity) p.thisObject,
+                                        (Integer) p.args[0], (Integer) p.args[1], (Intent) p.args[2]);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + "result failed: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + "result hook ok");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "result hook failed: " + t);
         }
     }
 
