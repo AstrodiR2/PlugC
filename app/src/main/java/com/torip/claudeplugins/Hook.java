@@ -28,7 +28,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static final long SHOW_MS = 2500;
 
     private static volatile WeakReference<Activity> activity = new WeakReference<>(null);
-    private static final Handler ui = new Handler(Looper.getMainLooper());
+    private static Handler ui = null;
     private static long lastSeen = 0;
     private static View badge = null;
 
@@ -118,7 +118,7 @@ public class Hook implements IXposedHookLoadPackage {
 
                 ((ViewGroup) a.getWindow().getDecorView()).addView(tv, lp);
                 badge = tv;
-                ui.postDelayed(Hook::hideBadge, SHOW_MS);
+                if (ui == null) ui = new Handler(Looper.getMainLooper()); ui.postDelayed(Hook::hideBadge, SHOW_MS);
             } catch (Throwable t) {
                 XposedBridge.log(TAG + "showBadge: " + t);
             }
