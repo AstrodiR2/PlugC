@@ -57,11 +57,11 @@ public final class Loader {
         boolean fsDelete(String path);
         String clipboardGet();
         void clipboardSet(String text);
-        void vibrate(long ms);
+        void vibrate(int ms);
         void notify(String title, String text);
         String deviceInfo();
         String su(String cmd);
-        int setTimeoutHost(long delayMs, boolean repeat);
+        int setTimeoutHost(int delayMs, boolean repeat);
         void clearTimerHost(int id);
         String dangerCallStatic(String cls, String method, String argTypes, String argsJson);
         String dangerCall(String handle, String method, String argTypes, String argsJson);
@@ -471,15 +471,15 @@ public final class Loader {
         }
 
         @Override
-        public void vibrate(final long ms) {
+        public void vibrate(final int ms) {
             ui().post(() -> {
                 try {
                     Vibrator v = (Vibrator) c.getSystemService(Context.VIBRATOR_SERVICE);
                     if (v == null) return;
                     if (Build.VERSION.SDK_INT >= 26) {
-                        v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE));
+                        v.vibrate(VibrationEffect.createOneShot((long) ms, VibrationEffect.DEFAULT_AMPLITUDE));
                     } else {
-                        v.vibrate(ms);
+                        v.vibrate((long) ms);
                     }
                 } catch (Throwable ignored) {}
             });
@@ -549,7 +549,7 @@ public final class Loader {
         }
 
         @Override
-        public int setTimeoutHost(long delayMs, boolean repeat) {
+        public int setTimeoutHost(int delayMs, boolean repeat) {
             final int id = (int) (System.nanoTime() & 0x7fffffff);
             if (run == null) return id;
             Runnable fire = () -> ex.execute(() -> {
@@ -560,8 +560,8 @@ public final class Loader {
                 }
             });
             ScheduledFuture<?> f = repeat
-                    ? sched.scheduleAtFixedRate(fire, delayMs, Math.max(16, delayMs), java.util.concurrent.TimeUnit.MILLISECONDS)
-                    : sched.schedule(fire, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    ? sched.scheduleAtFixedRate(fire, (long) delayMs, Math.max(16, delayMs), java.util.concurrent.TimeUnit.MILLISECONDS)
+                    : sched.schedule(fire, (long) delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
             run.timers.put(id, f);
             return id;
         }
