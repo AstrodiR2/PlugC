@@ -35,11 +35,12 @@ public class Hook implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
         appCl = lpp.classLoader;
-        XposedBridge.log(TAG + "v9 loaded");
+        XposedBridge.log(TAG + "v10 loaded");
         hookItem();
         hookPrivacy();
         hookScaffold();
         hookProvider();
+        hookProbe();
     }
 
     // ---------- root list: item "Plugins" ----------
@@ -352,6 +353,79 @@ public class Hook implements IXposedHookLoadPackage {
             if (++n >= 30) break;
         }
         XposedBridge.log(TAG + "STACK:" + sb);
+    }
+
+    private static final ThreadLocal<java.util.ArrayList<Object>> k3pStack =
+            new ThreadLocal<java.util.ArrayList<Object>>() {
+                @Override
+                protected java.util.ArrayList<Object> initialValue() {
+                    return new java.util.ArrayList<Object>();
+                }
+            };
+    private static int w090Logged = 0;
+
+    private static String cn(Object o) {
+        return o == null ? "null" : o.getClass().getName();
+    }
+
+    private static String desc(Object k) {
+        try {
+            byte v = XposedHelpers.getByteField(k, "v");
+            Object w = XposedHelpers.getObjectField(k, "w");
+            Object x = XposedHelpers.getObjectField(k, "x");
+            String ws = cn(w);
+            if (w != null && ws.endsWith("r4d")) {
+                ws += "(" + cn(XposedHelpers.getObjectField(w, "x")) + ")";
+            }
+            return "k3p v=" + v + " w=" + ws + " x=" + cn(x);
+        } catch (Throwable t) {
+            return "k3p ?";
+        }
+    }
+
+    private void hookProbe() {
+        try {
+            Class<?> k = XposedHelpers.findClass("k3p", appCl);
+            int n = 0;
+            for (Method m : k.getDeclaredMethods()) {
+                if (m.getName().equals("p") && m.getParameterTypes().length == 3) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            k3pStack.get().add(p.thisObject);
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam p) {
+                            java.util.ArrayList<Object> l = k3pStack.get();
+                            if (!l.isEmpty()) l.remove(l.size() - 1);
+                        }
+                    });
+                    n++;
+                }
+            }
+            Class<?> w = XposedHelpers.findClass("w090", appCl);
+            for (Method m : w.getDeclaredMethods()) {
+                if (m.getName().equals("i") && m.getParameterTypes().length == 4) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            if (w090Logged >= 6) return;
+                            w090Logged++;
+                            StringBuilder sb = new StringBuilder();
+                            sb.append("W090.i v=").append(XposedHelpers.getByteField(p.thisObject, "v"));
+                            sb.append(" arg0=").append(cn(p.args[0]));
+                            for (Object o : k3pStack.get()) sb.append("\n    ").append(desc(o));
+                            XposedBridge.log(TAG + "PROBE " + sb);
+                        }
+                    });
+                    n++;
+                }
+            }
+            XposedBridge.log(TAG + "probe hooks: " + n);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "probe failed: " + t);
+        }
     }
 
     private static Object getNoop() {
