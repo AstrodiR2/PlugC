@@ -3,8 +3,8 @@
 Плагины для Android-приложения **Claude** — без патчинга APK.
 
 [![Telegram](https://img.shields.io/badge/Telegram-%40PluginClaude-26A5E4?logo=telegram&logoColor=white)](https://t.me/PluginClaude)
-[![Latest release](https://img.shields.io/github/v/release/AstrodiR2/claude-plugins?label=release)](https://github.com/AstrodiR2/claude-plugins/releases/latest)
-[![Build](https://github.com/AstrodiR2/claude-plugins/actions/workflows/build.yml/badge.svg)](https://github.com/AstrodiR2/claude-plugins/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/AstrodiR2/PlugC?label=release)](https://github.com/AstrodiR2/PlugC/releases/latest)
+[![Build](https://github.com/AstrodiR2/PlugC/actions/workflows/build.yml/badge.svg)](https://github.com/AstrodiR2/PlugC/actions/workflows/build.yml)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)](#требования)
 
 **Claude Plugins** — это Xposed/LSPosed-модуль, который добавляет в настройки приложения Claude отдельный раздел **«Плагины»**. В нём можно включать и выключать JS-плагины, смотреть их статус и логи, импортировать новые плагины одним нажатием.
@@ -70,7 +70,7 @@ Root можно получить и без ПК: в инструкции ниж�
 
 ### Вариант A. Root уже есть
 
-1. Скачай APK модуля со страницы [Releases](https://github.com/AstrodiR2/claude-plugins/releases/latest) или из [Telegram-канала](https://t.me/PluginClaude).
+1. Скачай APK модуля со страницы [Releases](https://github.com/AstrodiR2/PlugC/releases/latest) или из [Telegram-канала](https://t.me/PluginClaude).
 2. Установи APK как обычное приложение.
 3. Открой **LSPosed → Модули** и включи **Claude Plugins**.
 4. Проверь область действия (Scope): должен быть выбран **Claude** (`com.anthropic.claude`). Если его нет — добавь вручную.
@@ -92,7 +92,7 @@ Root можно получить и без ПК: в инструкции ниж�
 - [Zygisk Next](https://github.com/Dr-TSNG/ZygiskNext/releases/latest) — свежая версия под твой Android.
 - [LSPosed](https://github.com/LSPosed/LSPosed/releases/latest) — Zygisk-версия.
   - На Android 15+ официальный LSPosed может не работать — используй актуальный форк [Vector](https://github.com/JingMatrix/Vector/releases/latest).
-- **Claude Plugins APK** — [Releases](https://github.com/AstrodiR2/claude-plugins/releases/latest) или [Telegram](https://t.me/PluginClaude).
+- **Claude Plugins APK** — [Releases](https://github.com/AstrodiR2/PlugC/releases/latest) или [Telegram](https://t.me/PluginClaude).
 - Приложение **Claude** из Google Play.
 
 #### Шаг 2. Получи root через DirtyFrag
@@ -225,7 +225,7 @@ zip -r ../my-plugin.zip manifest.json main.js
 
 Что делать:
 
-1. Проверь, есть ли новая версия модуля в [Releases](https://github.com/AstrodiR2/claude-plugins/releases) или в [Telegram](https://t.me/PluginClaude).
+1. Проверь, есть ли новая версия модуля в [Releases](https://github.com/AstrodiR2/PlugC/releases) или в [Telegram](https://t.me/PluginClaude).
 2. Если новой версии нет — сообщи о проблеме в канал, приложив версию Claude и лог LSPosed.
 
 </details>
@@ -309,8 +309,8 @@ zip -r ../my-plugin.zip manifest.json main.js
 Нужны JDK 17, Android SDK 34 и Gradle 8.9.
 
 ```sh
-git clone https://github.com/AstrodiR2/claude-plugins.git
-cd claude-plugins
+git clone https://github.com/AstrodiR2/PlugC.git
+cd PlugC
 gradle assembleDebug
 ```
 
@@ -320,14 +320,14 @@ APK появится здесь:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-CI собирает проект на каждый push: [Actions](https://github.com/AstrodiR2/claude-plugins/actions). В артефакте `module-debug` лежит `app-debug.apk`.
+CI собирает проект на каждый push: [Actions](https://github.com/AstrodiR2/PlugC/actions). В артефакте `module-debug` лежит `app-debug.apk`.
 
 ## Ссылки
 
 - Telegram-канал: [@PluginClaude](https://t.me/PluginClaude)
-- Релизы: [github.com/AstrodiR2/claude-plugins/releases](https://github.com/AstrodiR2/claude-plugins/releases)
-- Сборки: [github.com/AstrodiR2/claude-plugins/actions](https://github.com/AstrodiR2/claude-plugins/actions)
-- Проблемы: [github.com/AstrodiR2/claude-plugins/issues](https://github.com/AstrodiR2/claude-plugins/issues)
+- Релизы: [github.com/AstrodiR2/PlugC/releases](https://github.com/AstrodiR2/PlugC/releases)
+- Сборки: [github.com/AstrodiR2/PlugC/actions](https://github.com/AstrodiR2/PlugC/actions)
+- Проблемы: [github.com/AstrodiR2/PlugC/issues](https://github.com/AstrodiR2/PlugC/issues)
 - DirtyFrag: [github.com/mitschud/DirtyFrag](https://github.com/mitschud/DirtyFrag)
 - KernelSU: [github.com/tiann/KernelSU](https://github.com/tiann/KernelSU)
 - Zygisk Next: [github.com/Dr-TSNG/ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext)
