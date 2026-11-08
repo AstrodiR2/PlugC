@@ -57,10 +57,13 @@ public class Hook implements IXposedHookLoadPackage {
     private void hookItem(ClassLoader cl) {
         try {
             Class<?> c = XposedHelpers.findClass("com.anthropic.claude.settings.q", cl);
+            Method[] ms = c.getDeclaredMethods();
+            XposedBridge.log(TAG + "v3 q methods: " + ms.length);
             int n = 0;
-            for (Method m : c.getDeclaredMethods()) {
+            for (Method m : ms) {
                 Class<?>[] pt = m.getParameterTypes();
-                XposedBridge.log(TAG + "q." + m.getName() + " argc=" + pt.length + " arg0=" + (pt.length > 0 ? pt[0].getName() : "-"));
+                XposedBridge.log(TAG + "q." + m.getName() + " argc=" + pt.length
+                        + " arg0=" + (pt.length > 0 ? pt[0].getName() : "-"));
                 if (m.getName().equals("c") && pt.length == 8 && pt[0].getName().endsWith("m090")) {
                     XposedBridge.hookMethod(m, new XC_MethodHook() {
                         @Override
