@@ -33,6 +33,52 @@ public class Hook implements IXposedHookLoadPackage {
         hookActivity();
         hookItem();
         hookResult();
+        hookSse();
+    }
+
+    private static final java.util.Set<String> sseLoggedTypes =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    private void hookSse() {
+        try {
+            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.conversation.sse.c", appCl);
+            XposedHelpers.findAndHookMethod(c, "a", Object.class, Object.class, new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam p) {
+                    Object ev = p.args[0];
+                    if (ev == null) return;
+                    String cls = ev.getClass().getName();
+                    boolean always = cls.endsWith(".u6u") || cls.endsWith(".cyt") || cls.endsWith(".f5e");
+                    if (always || sseLoggedTypes.add(cls)) {
+                        android.util.Log.i("ClaudePluginsSSE", cls + " :: " + dump(ev, 0));
+                    }
+                }
+            });
+            XposedBridge.log(TAG + "sse hook ok");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "sse hook failed: " + t);
+        }
+    }
+
+    private static String dump(Object o, int depth) {
+        if (o == null) return "null";
+        if (depth > 1) return o.getClass().getSimpleName() + "{...}";
+        if (o instanceof String || o instanceof Number || o instanceof Boolean || o instanceof CharSequence) {
+            String s = String.valueOf(o);
+            return s.length() > 200 ? s.substring(0, 200) + "...(" + s.length() + ")" : s;
+        }
+        StringBuilder sb = new StringBuilder(o.getClass().getSimpleName()).append("{");
+        try {
+            for (java.lang.reflect.Field f : o.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object v;
+                try { v = f.get(o); } catch (Throwable t) { v = "<err>"; }
+                sb.append(f.getName()).append("=").append(dump(v, depth + 1)).append(", ");
+            }
+        } catch (Throwable ignored) {}
+        sb.append("}");
+        return sb.toString();
     }
 
     private void hookActivity() {
