@@ -34,6 +34,7 @@ public class Hook implements IXposedHookLoadPackage {
         hookItem();
         hookResult();
         hookSse();
+        hookHttp();
     }
 
     private static final java.util.Set<String> sseLoggedTypes =
@@ -57,6 +58,44 @@ public class Hook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + "sse hook ok");
         } catch (Throwable t) {
             XposedBridge.log(TAG + "sse hook failed: " + t);
+        }
+    }
+
+    private void hookHttp() {
+        try {
+            XposedHelpers.findAndHookMethod("okhttp3.OkHttpClient", appCl, "newCall",
+                    "okhttp3.Request", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam p) {
+                    try {
+                        Object req = p.args[0];
+                        String url = String.valueOf(XposedHelpers.callMethod(req, "url"));
+                        int q = url.indexOf('?');
+                        if (q > 0) url = url.substring(0, q);
+                        String method = String.valueOf(XposedHelpers.callMethod(req, "method"));
+                        Object body = XposedHelpers.callMethod(req, "body");
+                        long len = -1;
+                        String head = "";
+                        if (body != null) {
+                            len = ((Number) XposedHelpers.callMethod(body, "contentLength")).longValue();
+                            if (len > 0 && len < 200000) {
+                                Class<?> bc = XposedHelpers.findClass("okio.Buffer", appCl);
+                                Object buf = bc.newInstance();
+                                XposedHelpers.callMethod(body, "writeTo", buf);
+                                String s = (String) XposedHelpers.callMethod(buf, "readUtf8");
+                                head = s.length() > 300 ? s.substring(0, 300) : s;
+                            }
+                        }
+                        android.util.Log.i("ClaudePluginsHTTP",
+                                method + " " + url + " len=" + len + " body=" + head);
+                    } catch (Throwable t) {
+                        android.util.Log.w("ClaudePluginsHTTP", "log failed: " + t);
+                    }
+                }
+            });
+            XposedBridge.log(TAG + "http hook ok");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "http hook failed: " + t);
         }
     }
 
