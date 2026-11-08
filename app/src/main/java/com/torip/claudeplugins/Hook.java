@@ -1,11 +1,19 @@
 package com.torip.claudeplugins;
 
-import android.content.res.Resources;
+import android.app.Activity;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
-import java.util.HashMap;
-import java.util.Map;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -16,107 +24,112 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class Hook implements IXposedHookLoadPackage {
     private static final String TAG = "ClaudePlugins: ";
     private static final String PKG = "com.anthropic.claude";
+    private static final long NEW_ENTRY_GAP_MS = 1500;
+    private static final long SHOW_MS = 2500;
 
-    private static final String[] TARGETS = {
-            "Профиль",
-            "Хотите больше возможностей Claude?",
-            "Profile"
-    };
-
-    private static final Map<String, Long> last = new HashMap<>();
+    private static volatile WeakReference<Activity> activity = new WeakReference<>(null);
+    private static final Handler ui = new Handler(Looper.getMainLooper());
+    private static long lastSeen = 0;
+    private static View badge = null;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
-        XposedBridge.log(TAG + "probe2 loaded, process=" + lpp.processName);
-        hookStrings();
-        hookSettingsClass(lpp.classLoader);
+        XposedBridge.log(TAG + "stage1 loaded, process=" + lpp.processName);
+        hookActivity(lpp.classLoader);
+        hookItem(lpp.classLoader);
     }
 
-    private static boolean throttle(String key, long ms) {
-        long now = SystemClock.uptimeMillis();
-        synchronized (last) {
-            Long t = last.get(key);
-            if (t != null && now - t < ms) return false;
-            last.put(key, now);
-            return true;
-        }
-    }
-
-    private void hookStrings() {
+    private void hookActivity(ClassLoader cl) {
         try {
-            XC_MethodHook h = new XC_MethodHook() {
+            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.mainactivity.MainActivity", cl);
+            XposedHelpers.findAndHookMethod(c, "onResume", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam p) {
-                    try {
-                        Object r = p.getResult();
-                        if (r == null) return;
-                        String s = r.toString();
-                        for (String t : TARGETS) {
-                            if (t.equals(s)) {
-                                if (!throttle("str:" + t, 3000)) return;
-                                int id = (Integer) p.args[0];
-                                XposedBridge.log(TAG + "STRING \"" + s + "\" id=0x"
-                                        + Integer.toHexString(id));
-                                logStack();
-                                return;
-                            }
-                        }
-                    } catch (Throwable ignored) {
-                    }
+                    activity = new WeakReference<>((Activity) p.thisObject);
                 }
-            };
-            XposedHelpers.findAndHookMethod(Resources.class, "getText", int.class, h);
-            XposedHelpers.findAndHookMethod(Resources.class, "getString", int.class, h);
-            XposedBridge.log(TAG + "string hooks installed");
+            });
         } catch (Throwable t) {
-            XposedBridge.log(TAG + "string hook failed: " + t);
+            XposedBridge.log(TAG + "activity hook failed: " + t);
         }
     }
 
-    private static void logStack() {
-        StackTraceElement[] st = new Throwable().getStackTrace();
-        StringBuilder sb = new StringBuilder();
-        int n = 0;
-        for (StackTraceElement e : st) {
-            String c = e.getClassName();
-            if (c.startsWith("android.") || c.startsWith("java.")
-                    || c.startsWith("de.robv") || c.startsWith("LSPHooker")
-                    || c.startsWith("com.torip") || c.startsWith("kotlin.")
-                    || c.startsWith("dalvik.") || c.startsWith("org.lsposed")) continue;
-            sb.append("\n    ").append(c).append('.').append(e.getMethodName())
-                    .append(':').append(e.getLineNumber());
-            if (++n >= 25) break;
-        }
-        XposedBridge.log(TAG + "stack:" + sb);
-    }
-
-    private void hookSettingsClass(ClassLoader cl) {
+    private void hookItem(ClassLoader cl) {
         try {
-            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.settings.c", cl);
+            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.settings.q", cl);
             int n = 0;
             for (Method m : c.getDeclaredMethods()) {
-                if (m.isSynthetic()) continue;
-                final String name = m.getName();
-                XposedBridge.hookMethod(m, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam p) {
-                        if (!throttle("c." + name, 1000)) return;
-                        String a0 = "none";
-                        if (p.args != null && p.args.length > 0) {
-                            a0 = p.args[0] == null ? "null"
-                                    : p.args[0].getClass().getName();
+                Class<?>[] pt = m.getParameterTypes();
+                if (m.getName().equals("c") && pt.length == 8 && pt[0].getName().equals("defpackage.m090")) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            onItem(p.args[0]);
                         }
-                        XposedBridge.log(TAG + "settings.c." + name
-                                + " argc=" + (p.args == null ? 0 : p.args.length)
-                                + " arg0=" + a0);
-                    }
-                });
-                n++;
+                    });
+                    n++;
+                }
             }
-            XposedBridge.log(TAG + "settings.c hooks: " + n);
+            XposedBridge.log(TAG + "item hooks: " + n);
         } catch (Throwable t) {
-            XposedBridge.log(TAG + "settings.c hook failed: " + t);
+            XposedBridge.log(TAG + "item hook failed: " + t);
+        }
+    }
+
+    private static void onItem(Object item) {
+        try {
+            long now = SystemClock.uptimeMillis();
+            boolean fresh = now - lastSeen > NEW_ENTRY_GAP_MS;
+            lastSeen = now;
+            String name = item instanceof Enum ? ((Enum<?>) item).name() : "?";
+            if (fresh) {
+                XposedBridge.log(TAG + "settings entry, first item=" + name);
+                showBadge();
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "onItem: " + t);
+        }
+    }
+
+    private static void showBadge() {
+        final Activity a = activity.get();
+        if (a == null) return;
+        a.runOnUiThread(() -> {
+            try {
+                hideBadge();
+                TextView tv = new TextView(a);
+                tv.setText("Работает");
+                tv.setTextColor(Color.parseColor("#1A1A1A"));
+                tv.setTextSize(14);
+                tv.setTypeface(null, android.graphics.Typeface.BOLD);
+                float d = a.getResources().getDisplayMetrics().density;
+                tv.setPadding((int) (16 * d), (int) (8 * d), (int) (16 * d), (int) (8 * d));
+                GradientDrawable bg = new GradientDrawable(
+                        GradientDrawable.Orientation.LEFT_RIGHT,
+                        new int[]{Color.parseColor("#E5E4E2"), Color.parseColor("#B8B8BC"), Color.parseColor("#F4F4F6")});
+                bg.setCornerRadius(100 * d);
+                tv.setBackground(bg);
+                tv.setElevation(8 * d);
+
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                lp.topMargin = (int) (72 * d);
+
+                ((ViewGroup) a.getWindow().getDecorView()).addView(tv, lp);
+                badge = tv;
+                ui.postDelayed(Hook::hideBadge, SHOW_MS);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + "showBadge: " + t);
+            }
+        });
+    }
+
+    private static void hideBadge() {
+        View b = badge;
+        badge = null;
+        if (b != null && b.getParent() instanceof ViewGroup) {
+            ((ViewGroup) b.getParent()).removeView(b);
         }
     }
 }
