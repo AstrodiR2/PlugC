@@ -7,6 +7,10 @@ import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -22,7 +26,10 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -40,23 +47,30 @@ import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 import de.robv.android.xposed.XposedBridge;
 
 final class PluginsUi {
     static final int BG = 0xFF141414, CARD = 0xFF1F1F1E, STROKE = 0xFF2E2E2C,
             TEXT = 0xFFF2F1EE, SUB = 0xFFB4B3AE, DIM = 0xFF8E8D89, ACCENT = 0xFFD97757,
-            BLUE = 0xFF3B82F6, RED = 0xFFFF6B6B, MENU = 0xFF222222;
+            BLUE = 0xFF3B82F6, RED = 0xFFFF6B6B, GREEN = 0xFF4ADE80, MENU = 0xFF222222;
     private static final int MP = -1, WC = -2;
     static final int REQ = 7731;
     private static boolean showing = false;
@@ -66,6 +80,7 @@ final class PluginsUi {
     private final Activity a;
     private final float d;
     private final SharedPreferences prefs;
+    private final Map<String, TextView> stViews = new HashMap<String, TextView>();
     private Dialog dlg;
     private Slide root;
     private LinearLayout list;
@@ -75,6 +90,11 @@ final class PluginsUi {
     private float tx, ty;
     private int tab = 0;
     private boolean closing = false;
+
+    private FrameLayout detail;
+    private String detailDir;
+    private TextView detStatus, detLog;
+    private ScrollView detScroll;
 
     private PluginsUi(Activity a) {
         this.a = a;
@@ -110,7 +130,6 @@ final class PluginsUi {
 
     private View content() { return a.findViewById(android.R.id.content); }
 
-    // ================= icons =================
     static class Ic extends View {
         static final int BACK = 0, REFRESH = 1, FILE = 2, EQNOT = 3;
         final int type;
@@ -169,7 +188,6 @@ final class PluginsUi {
         }
     }
 
-    // ================= animated switch =================
     static class Sw extends View {
         boolean on;
         float prog;
@@ -215,7 +233,6 @@ final class PluginsUi {
         }
     }
 
-    // ================= root with edge-swipe back =================
     static class Slide extends FrameLayout {
         interface Host { void onDrag(float tx); void onRelease(float tx); }
         Host host;
@@ -283,7 +300,6 @@ final class PluginsUi {
         }
     }
 
-    // ================= data =================
     private static class Plugin {
         File file;
         String dir, name, version, desc, author;
@@ -308,16 +324,7 @@ final class PluginsUi {
             try {
                 File m = new File(f, "manifest.json");
                 if (m.exists()) {
-                    byte[] b = new byte[(int) m.length()];
-                    FileInputStream in = new FileInputStream(m);
-                    int off = 0;
-                    while (off < b.length) {
-                        int r = in.read(b, off, b.length - off);
-                        if (r < 0) break;
-                        off += r;
-                    }
-                    in.close();
-                    JSONObject j = new JSONObject(new String(b, "UTF-8"));
+                    JSONObject j = new JSONObject(new String(Loader.readBytes(m), "UTF-8"));
                     p.name = j.optString("name", p.dir);
                     p.version = j.optString("version", "?");
                     p.desc = j.optString("description", "");
@@ -330,7 +337,6 @@ final class PluginsUi {
         return out;
     }
 
-    // ================= import =================
     private void importUri(final Uri uri) {
         new Thread(() -> {
             try {
@@ -465,16 +471,100 @@ final class PluginsUi {
         }
     }
 
-    // ================= screen =================
+    private Uri exportToDownloads(String sub, String name, String mime, byte[] data) throws Exception {
+        ContentValues v = new ContentValues();
+        v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+        if (mime != null) v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+        v.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                Environment.DIRECTORY_DOWNLOADS + (sub.length() > 0 ? "/" + sub : ""));
+        ContentResolver cr = a.getContentResolver();
+        Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+        if (uri == null) throw new Exception("не удалось создать файл в Загрузках");
+        OutputStream os = cr.openOutputStream(uri);
+        try {
+            os.write(data);
+        } finally {
+            os.close();
+        }
+        return uri;
+    }
+
+    private byte[] zipDir(File dir) throws Exception {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        ZipOutputStream z = new ZipOutputStream(bo);
+        addZip(z, dir, dir.getName() + "/");
+        z.close();
+        return bo.toByteArray();
+    }
+
+    private void addZip(ZipOutputStream z, File f, String path) throws Exception {
+        File[] cs = f.listFiles();
+        if (cs == null) return;
+        for (File c : cs) {
+            if (c.isDirectory()) {
+                addZip(z, c, path + c.getName() + "/");
+            } else {
+                z.putNextEntry(new ZipEntry(path + c.getName()));
+                z.write(Loader.readBytes(c));
+                z.closeEntry();
+            }
+        }
+    }
+
+    private void openWith(Plugin p) {
+        try {
+            File f = new File(p.file, "main.js");
+            if (!f.exists()) { toast("Нет main.js"); return; }
+            Uri u = exportToDownloads("ClaudePlugins", p.dir + ".js", null, Loader.readBytes(f));
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(u, "text/plain");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            a.startActivity(Intent.createChooser(i, "Открыть с помощью"));
+            toast("Копия в Загрузки/ClaudePlugins");
+        } catch (Throwable t) {
+            toast("Не удалось: " + t.getMessage());
+        }
+    }
+
+    private void sharePlugin(Plugin p) {
+        try {
+            Uri u = exportToDownloads("ClaudePlugins", p.dir + ".zip", "application/zip", zipDir(p.file));
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType("application/zip");
+            i.putExtra(Intent.EXTRA_STREAM, u);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            a.startActivity(Intent.createChooser(i, "Поделиться"));
+        } catch (Throwable t) {
+            toast("Не удалось: " + t.getMessage());
+        }
+    }
+
+    private void copyLog(Plugin p) {
+        String log = Loader.readLog(a, p.dir);
+        if (log.length() == 0) { toast("Лог пуст"); return; }
+        ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(ClipData.newPlainText(p.name + " log", log));
+        toast("Лог скопирован");
+    }
+
+    private void saveLog(Plugin p) {
+        String log = Loader.readLog(a, p.dir);
+        if (log.length() == 0) { toast("Лог пуст"); return; }
+        try {
+            String name = p.dir + "-log-"
+                    + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()) + ".txt";
+            exportToDownloads("", name, "text/plain", log.getBytes("UTF-8"));
+            toast("Сохранено в Загрузки: " + name);
+        } catch (Throwable t) {
+            toast("Не удалось: " + t.getMessage());
+        }
+    }
+
     private void open() {
         dlg = new Dialog(a, android.R.style.Theme_DeviceDefault_NoActionBar) {
             @Override
             public void onBackPressed() {
-                if (popup != null && popup.isShowing()) {
-                    popup.dismiss();
-                    return;
-                }
-                closeScreen();
+                PluginsUi.this.onBack();
             }
         };
         Window w = dlg.getWindow();
@@ -494,12 +584,14 @@ final class PluginsUi {
         root.host = new Slide.Host() {
             @Override
             public void onDrag(float t) {
+                if (detail != null) return;
                 root.setTranslationX(t);
                 parallax(1f - t / width());
             }
 
             @Override
             public void onRelease(float t) {
+                if (detail != null) return;
                 if (t > width() / 3f) {
                     closeScreen();
                 } else {
@@ -580,6 +672,18 @@ final class PluginsUi {
         content().setTranslationX(-width() * 0.3f * Math.max(0f, Math.min(1f, k)));
     }
 
+    private void onBack() {
+        if (popup != null && popup.isShowing()) {
+            popup.dismiss();
+            return;
+        }
+        if (detail != null) {
+            closeDetail();
+            return;
+        }
+        closeScreen();
+    }
+
     private void closeScreen() {
         if (closing) return;
         closing = true;
@@ -600,7 +704,7 @@ final class PluginsUi {
         t.setGravity(Gravity.CENTER);
         h.addView(t, new FrameLayout.LayoutParams(MP, MP));
         final View back = hit(Ic.BACK);
-        back.setOnClickListener(v -> closeScreen());
+        back.setOnClickListener(v -> onBack());
         h.addView(back, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.START));
         final FrameLayout ref = hit(Ic.REFRESH);
         ref.setOnClickListener(v -> {
@@ -619,7 +723,6 @@ final class PluginsUi {
         return f;
     }
 
-    // ================= tabs =================
     private View buildTabs() {
         final FrameLayout box = new FrameLayout(a);
         GradientDrawable bd = new GradientDrawable();
@@ -703,7 +806,6 @@ final class PluginsUi {
         }
     }
 
-    // ================= widgets =================
     private void press(View v) {
         v.setOnTouchListener((x, e) -> {
             switch (e.getActionMasked()) {
@@ -754,6 +856,23 @@ final class PluginsUi {
         return t;
     }
 
+    private <T extends View> T padTop(T v, int dpv) {
+        v.setPadding(v.getPaddingLeft(), dp(dpv), v.getPaddingRight(), v.getPaddingBottom());
+        return v;
+    }
+
+    private LinearLayout box() {
+        LinearLayout l = new LinearLayout(a);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(16), dp(14), dp(16), dp(14));
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(CARD);
+        g.setCornerRadius(dp(20));
+        g.setStroke(dp(1), STROKE);
+        l.setBackground(g);
+        return l;
+    }
+
     private View iconBox(int size, int iconSize) {
         FrameLayout b = new FrameLayout(a);
         GradientDrawable g = new GradientDrawable();
@@ -766,9 +885,30 @@ final class PluginsUi {
         return b;
     }
 
-    // ================= list =================
+    private void applyStatus(TextView t, String dir) {
+        String s = Loader.status(dir);
+        if ("running".equals(s)) {
+            t.setText("● Запущен");
+            t.setTextColor(GREEN);
+            t.setVisibility(View.VISIBLE);
+        } else if ("error".equals(s)) {
+            t.setText("● Ошибка: " + Loader.error(dir));
+            t.setTextColor(RED);
+            t.setVisibility(View.VISIBLE);
+        } else {
+            t.setVisibility(View.GONE);
+        }
+    }
+
+    private void updateStatus(String dir) {
+        TextView t = stViews.get(dir);
+        if (t != null) applyStatus(t, dir);
+        if (detail != null && dir.equals(detailDir)) refreshDetail();
+    }
+
     private void fill() {
         list.removeAllViews();
+        stViews.clear();
         List<Plugin> ps = load();
         if (ps.isEmpty()) {
             LinearLayout e = new LinearLayout(a);
@@ -820,6 +960,13 @@ final class PluginsUi {
         col.setOrientation(LinearLayout.VERTICAL);
         col.addView(tv(p.name, 16, TEXT, true));
         col.addView(tv("Версия: " + p.version, 12, DIM, false));
+        TextView st = tv("", 12, DIM, false);
+        st.setMaxLines(2);
+        st.setEllipsize(TextUtils.TruncateAt.END);
+        st.setPadding(0, dp(2), 0, 0);
+        applyStatus(st, p.dir);
+        stViews.put(p.dir, st);
+        col.addView(st);
         if (p.desc.length() > 0) {
             TextView ds = tv(p.desc, 14, SUB, false);
             ds.setPadding(0, dp(4), 0, 0);
@@ -837,10 +984,16 @@ final class PluginsUi {
 
         final String key = "en:" + p.dir;
         final Sw sw = new Sw(a, prefs.getBoolean(key, false));
-        sw.change = () -> prefs.edit().putBoolean(key, sw.on).apply();
+        sw.change = () -> {
+            prefs.edit().putBoolean(key, sw.on).apply();
+            Context ac = a.getApplicationContext();
+            if (sw.on) Loader.start(ac, p.dir, () -> updateStatus(p.dir));
+            else Loader.stop(ac, p.dir, () -> updateStatus(p.dir));
+        };
         c.addView(sw, new LinearLayout.LayoutParams(WC, WC));
 
         press(c);
+        c.setOnClickListener(v -> openDetail(p));
         c.setOnLongClickListener(v -> {
             showMenu(p, c);
             return true;
@@ -848,7 +1001,124 @@ final class PluginsUi {
         return c;
     }
 
-    // ================= long-press menu =================
+    private void openDetail(final Plugin p) {
+        if (detail != null) return;
+        detailDir = p.dir;
+        final FrameLayout d0 = new FrameLayout(a);
+        d0.setBackgroundColor(BG);
+        d0.setClickable(true);
+
+        LinearLayout col = new LinearLayout(a);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        FrameLayout h = new FrameLayout(a);
+        TextView t = new TextView(a);
+        t.setText(p.name);
+        t.setTextColor(0xFFF6F5F2);
+        t.setTextSize(20);
+        t.setTypeface(Typeface.create(Typeface.SERIF, Typeface.BOLD));
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setPadding(dp(56), 0, dp(56), 0);
+        h.addView(t, new FrameLayout.LayoutParams(MP, MP));
+        View back = hit(Ic.BACK);
+        back.setOnClickListener(v -> closeDetail());
+        h.addView(back, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.START));
+        final FrameLayout ref = hit(Ic.REFRESH);
+        ref.setOnClickListener(v -> {
+            ref.getChildAt(0).animate().rotationBy(360).setDuration(450).start();
+            refreshDetail();
+        });
+        h.addView(ref, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END));
+        col.addView(h, new LinearLayout.LayoutParams(MP, dp(56)));
+
+        detScroll = new ScrollView(a);
+        detScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout body = new LinearLayout(a);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), dp(8), dp(16), dp(16));
+
+        LinearLayout info = box();
+        info.addView(tv(p.name, 18, TEXT, true));
+        info.addView(tv("Версия: " + p.version, 13, DIM, false));
+        if (p.author.length() > 0) info.addView(padTop(tv("Автор: " + p.author, 13, DIM, false), 2));
+        if (p.desc.length() > 0) info.addView(padTop(tv(p.desc, 15, SUB, false), 8));
+        detStatus = padTop(tv("", 13, SUB, false), 10);
+        info.addView(detStatus);
+        body.addView(info, new LinearLayout.LayoutParams(MP, WC));
+
+        TextView lab = tv("Лог", 13, DIM, true);
+        LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(WC, WC);
+        ll.topMargin = dp(20);
+        ll.bottomMargin = dp(8);
+        ll.leftMargin = dp(4);
+        body.addView(lab, ll);
+
+        detLog = tv("", 12, TEXT, false);
+        detLog.setTypeface(Typeface.MONOSPACE);
+        detLog.setTextIsSelectable(true);
+        detLog.setPadding(dp(12), dp(12), dp(12), dp(12));
+        GradientDrawable lg = new GradientDrawable();
+        lg.setColor(0xFF191918);
+        lg.setCornerRadius(dp(16));
+        lg.setStroke(dp(1), STROKE);
+        detLog.setBackground(lg);
+        body.addView(detLog, new LinearLayout.LayoutParams(MP, WC));
+
+        detScroll.addView(body, new FrameLayout.LayoutParams(MP, WC));
+        col.addView(detScroll, new LinearLayout.LayoutParams(MP, 0, 1f));
+
+        LinearLayout bar = new LinearLayout(a);
+        bar.setPadding(dp(16), dp(8), dp(16), dp(16));
+        LinearLayout.LayoutParams l1 = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        l1.rightMargin = dp(5);
+        LinearLayout.LayoutParams l2 = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        l2.leftMargin = dp(5);
+        bar.addView(pill("Скачать лог", false, () -> saveLog(p)), l1);
+        bar.addView(pill("Скопировать лог", true, () -> copyLog(p)), l2);
+        col.addView(bar, new LinearLayout.LayoutParams(MP, WC));
+
+        d0.addView(col, new FrameLayout.LayoutParams(MP, MP));
+        detail = d0;
+        root.addView(d0, root.indexOfChild(scrim), new FrameLayout.LayoutParams(MP, MP));
+        d0.setTranslationX(width());
+        d0.animate().translationX(0).setDuration(280)
+                .setInterpolator(new DecelerateInterpolator(1.6f)).start();
+        refreshDetail();
+    }
+
+    private void refreshDetail() {
+        if (detail == null || detStatus == null || detLog == null) return;
+        String s = Loader.status(detailDir);
+        if ("running".equals(s)) {
+            detStatus.setText("Состояние: запущен");
+            detStatus.setTextColor(GREEN);
+        } else if ("error".equals(s)) {
+            detStatus.setText("Состояние: ошибка — " + Loader.error(detailDir));
+            detStatus.setTextColor(RED);
+        } else {
+            detStatus.setText("Состояние: остановлен");
+            detStatus.setTextColor(SUB);
+        }
+        String log = Loader.readLog(a, detailDir);
+        detLog.setText(log.length() == 0 ? "Лог пуст" : log);
+        final ScrollView sv = detScroll;
+        if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+    }
+
+    private void closeDetail() {
+        final FrameLayout d0 = detail;
+        if (d0 == null) return;
+        detail = null;
+        detStatus = null;
+        detLog = null;
+        detScroll = null;
+        d0.animate().translationX(width()).setDuration(240)
+                .setInterpolator(new DecelerateInterpolator(1.4f))
+                .withEndAction(() -> root.removeView(d0)).start();
+    }
+
     private void showMenu(final Plugin p, final View cardView) {
         final LinearLayout m = new LinearLayout(a);
         m.setOrientation(LinearLayout.VERTICAL);
@@ -858,8 +1128,8 @@ final class PluginsUi {
         m.setBackground(g);
         m.setPadding(0, dp(8), 0, dp(8));
 
-        m.addView(item("Открыть с помощью…", TEXT, () -> toast("Ещё не сделано")));
-        m.addView(item("Поделиться", TEXT, () -> toast("Ещё не сделано")));
+        m.addView(item("Открыть с помощью…", TEXT, () -> openWith(p)));
+        m.addView(item("Поделиться", TEXT, () -> sharePlugin(p)));
         View div = new View(a);
         div.setBackgroundColor(0xFF3A3A38);
         LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(MP, dp(1));
@@ -921,7 +1191,10 @@ final class PluginsUi {
                 .setMessage(p.name)
                 .setNegativeButton("Отмена", null)
                 .setPositiveButton("Удалить", (di, i) -> collapse(cardView, () -> {
+                    Loader.deleteData(a.getApplicationContext(), p.dir);
+                    prefs.edit().remove("en:" + p.dir).apply();
                     deleteDir(p.file);
+                    stViews.remove(p.dir);
                     list.removeView(cardView);
                     if (list.getChildCount() == 0) fill();
                 })).show();

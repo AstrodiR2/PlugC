@@ -1,6 +1,490 @@
 cd ~/claude-plugins
+D=app/src/main/java/com/torip/claudeplugins
 
-cat > app/src/main/java/com/torip/claudeplugins/PluginsUi.java <<'EOF'
+cat > $D/Loader.java <<'EOF_L'
+package com.torip.claudeplugins;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.os.Handler;
+import android.os.Looper;
+import android.widget.Toast;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.RandomAccessFile;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import app.cash.quickjs.QuickJs;
+
+public final class Loader {
+    public interface Host {
+        void log(String s);
+        void toast(String s);
+        String storageGet(String key);
+        void storageSet(String key, String value);
+    }
+
+    private static final class Run {
+        QuickJs js;
+        String status = "stopped";
+        String error = "";
+    }
+
+    private static final String PRELUDE =
+            "var claude = (function (h) {\n"
+            + "  function s(v) { return String(v); }\n"
+            + "  return {\n"
+            + "    log: function () { var a = []; for (var i = 0; i < arguments.length; i++) a.push(s(arguments[i])); h.log(a.join(' ')); },\n"
+            + "    toast: function (m) { h.toast(s(m)); },\n"
+            + "    storage: {\n"
+            + "      get: function (k) { var v = h.storageGet(s(k)); return (v === null || v === undefined) ? undefined : v; },\n"
+            + "      set: function (k, v) { h.storageSet(s(k), s(v)); }\n"
+            + "    }\n"
+            + "  };\n"
+            + "})(__host);\n";
+
+    private static final Map<String, Run> runs = new HashMap<String, Run>();
+    private static final ExecutorService ex = Executors.newSingleThreadExecutor();
+    private static Handler ui;
+    private static boolean started = false;
+
+    private Loader() {}
+
+    private static synchronized Handler ui() {
+        if (ui == null) ui = new Handler(Looper.getMainLooper());
+        return ui;
+    }
+
+    private static void finish(Runnable done) {
+        if (done != null) ui().post(done);
+    }
+
+    public static String status(String dir) {
+        synchronized (runs) {
+            Run r = runs.get(dir);
+            return r == null ? "stopped" : r.status;
+        }
+    }
+
+    public static String error(String dir) {
+        synchronized (runs) {
+            Run r = runs.get(dir);
+            return r == null ? "" : r.error;
+        }
+    }
+
+    public static void startAllOnce(Activity a) {
+        if (started) return;
+        started = true;
+        final Context c = a.getApplicationContext();
+        ex.execute(new Runnable() {
+            @Override
+            public void run() {
+                File[] fs = new File(c.getFilesDir(), "plugins").listFiles();
+                if (fs == null) return;
+                SharedPreferences p = c.getSharedPreferences("claudeplugins_ui", 0);
+                for (File f : fs) {
+                    if (f.isDirectory() && p.getBoolean("en:" + f.getName(), false)) {
+                        startNow(c, f.getName());
+                    }
+                }
+            }
+        });
+    }
+
+    public static void start(final Context c, final String dir, final Runnable done) {
+        ex.execute(new Runnable() {
+            @Override
+            public void run() {
+                startNow(c, dir);
+                finish(done);
+            }
+        });
+    }
+
+    public static void stop(final Context c, final String dir, final Runnable done) {
+        ex.execute(new Runnable() {
+            @Override
+            public void run() {
+                if (doStop(dir)) log(c, dir, "[stop] остановлен");
+                finish(done);
+            }
+        });
+    }
+
+    public static void deleteData(final Context c, final String dir) {
+        ex.execute(new Runnable() {
+            @Override
+            public void run() {
+                doStop(dir);
+                new File(new File(c.getFilesDir(), "pluginlogs"), dir + ".log").delete();
+                try {
+                    c.deleteSharedPreferences("plugin_storage_" + dir);
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+    }
+
+    private static boolean doStop(String dir) {
+        Run r;
+        synchronized (runs) {
+            r = runs.remove(dir);
+        }
+        if (r == null) return false;
+        if (r.js != null) {
+            try {
+                r.js.close();
+            } catch (Throwable ignored) {
+            }
+        }
+        return true;
+    }
+
+    private static void startNow(Context c, String dir) {
+        doStop(dir);
+        Run r = new Run();
+        synchronized (runs) {
+            runs.put(dir, r);
+        }
+        try {
+            File main = new File(new File(c.getFilesDir(), "plugins/" + dir), "main.js");
+            if (!main.exists()) {
+                r.status = "error";
+                r.error = "нет main.js";
+                log(c, dir, "[error] main.js не найден");
+                return;
+            }
+            String code = new String(readBytes(main), "UTF-8");
+            log(c, dir, "[start] запуск main.js");
+            QuickJs js = QuickJs.create();
+            r.js = js;
+            js.set("__host", Host.class, new HostImpl(c, dir));
+            js.evaluate(PRELUDE, "prelude.js");
+            js.evaluate(code, "main.js");
+            r.status = "running";
+            log(c, dir, "[ok] main.js выполнен");
+        } catch (Throwable t) {
+            r.status = "error";
+            r.error = brief(t);
+            log(c, dir, "[error] " + t + (t.getCause() != null ? " / " + t.getCause() : ""));
+            if (r.js != null) {
+                try {
+                    r.js.close();
+                } catch (Throwable ignored) {
+                }
+                r.js = null;
+            }
+        }
+    }
+
+    private static String brief(Throwable t) {
+        String m = t.getMessage();
+        if (m == null && t.getCause() != null) m = String.valueOf(t.getCause());
+        if (m != null && m.length() > 140) m = m.substring(0, 140);
+        return t.getClass().getSimpleName() + (m == null ? "" : ": " + m);
+    }
+
+    private static final class HostImpl implements Host {
+        final Context c;
+        final String dir;
+        final SharedPreferences sp;
+
+        HostImpl(Context c, String dir) {
+            this.c = c;
+            this.dir = dir;
+            this.sp = c.getSharedPreferences("plugin_storage_" + dir, 0);
+        }
+
+        @Override
+        public void log(String s) {
+            Loader.log(c, dir, s);
+        }
+
+        @Override
+        public void toast(final String s) {
+            ui().post(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(c, s, Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
+        @Override
+        public String storageGet(String key) {
+            return sp.getString(key, null);
+        }
+
+        @Override
+        public void storageSet(String key, String value) {
+            sp.edit().putString(key, value).apply();
+        }
+    }
+
+    public static void log(Context c, String dir, String line) {
+        try {
+            File d = new File(c.getFilesDir(), "pluginlogs");
+            d.mkdirs();
+            File f = new File(d, dir + ".log");
+            String ts = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+            synchronized (Loader.class) {
+                if (f.length() > 200000) trim(f);
+                FileOutputStream os = new FileOutputStream(f, true);
+                try {
+                    os.write((ts + " " + line + "\n").getBytes("UTF-8"));
+                } finally {
+                    os.close();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void trim(File f) throws Exception {
+        int keep = 100000;
+        RandomAccessFile r = new RandomAccessFile(f, "r");
+        byte[] b = new byte[keep];
+        try {
+            r.seek(r.length() - keep);
+            r.readFully(b);
+        } finally {
+            r.close();
+        }
+        FileOutputStream os = new FileOutputStream(f, false);
+        try {
+            os.write(b);
+        } finally {
+            os.close();
+        }
+    }
+
+    public static String readLog(Context c, String dir) {
+        try {
+            File f = new File(new File(c.getFilesDir(), "pluginlogs"), dir + ".log");
+            if (!f.exists()) return "";
+            synchronized (Loader.class) {
+                return new String(readBytes(f), "UTF-8");
+            }
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    public static byte[] readBytes(File f) throws Exception {
+        FileInputStream in = new FileInputStream(f);
+        try {
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int r;
+            while ((r = in.read(buf)) > 0) bo.write(buf, 0, r);
+            return bo.toByteArray();
+        } finally {
+            in.close();
+        }
+    }
+}
+EOF_L
+
+cat > $D/Hook.java <<'EOF_H'
+package com.torip.claudeplugins;
+
+import android.app.Activity;
+import android.content.Intent;
+
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+public class Hook implements IXposedHookLoadPackage {
+    private static final String TAG = "ClaudePlugins: ";
+    private static final String PKG = "com.anthropic.claude";
+
+    private static ClassLoader appCl;
+    private static Method qc;
+    private static Object fakeItem, unit;
+    private static boolean failed = false;
+    private static volatile WeakReference<Activity> activity = new WeakReference<>(null);
+
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
+        if (!PKG.equals(lpp.packageName)) return;
+        appCl = lpp.classLoader;
+        XposedBridge.log(TAG + "v13 loaded");
+        hookActivity();
+        hookItem();
+        hookResult();
+    }
+
+    private void hookActivity() {
+        try {
+            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.mainactivity.MainActivity", appCl);
+            XposedHelpers.findAndHookMethod(c, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam p) {
+                    Activity a = (Activity) p.thisObject;
+                    activity = new WeakReference<>(a);
+                    try {
+                        Loader.startAllOnce(a);
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + "loader failed: " + t);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "activity hook failed: " + t);
+        }
+    }
+
+    private void hookResult() {
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onActivityResult",
+                    int.class, int.class, Intent.class, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            try {
+                                PluginsUi.onResult((Activity) p.thisObject,
+                                        (Integer) p.args[0], (Integer) p.args[1], (Intent) p.args[2]);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + "result failed: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + "result hook ok");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "result hook failed: " + t);
+        }
+    }
+
+    private void hookItem() {
+        try {
+            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.settings.q", appCl);
+            int n = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                Class<?>[] pt = m.getParameterTypes();
+                if (m.getName().equals("c") && pt.length == 8 && pt[0].getName().endsWith("m090")) {
+                    m.setAccessible(true);
+                    qc = m;
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam p) {
+                            onItem(p.args);
+                        }
+                    });
+                    n++;
+                }
+            }
+            XposedBridge.log(TAG + "item hooks: " + n);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "item hook failed: " + t);
+        }
+    }
+
+    private static void onItem(Object[] orig) {
+        if (failed) return;
+        try {
+            Object item = orig[0];
+            if (!(item instanceof Enum) || !"Billing".equals(((Enum<?>) item).name())) return;
+            if (fakeItem == null) fakeItem = makeFake(item);
+            if (unit == null) unit = findUnit();
+
+            Object[] a = orig.clone();
+            a[0] = fakeItem;
+            a[2] = wrapClick(qc.getParameterTypes()[2]);
+            a[3] = null;
+            a[4] = "Плагины";
+            a[6] = 0;
+            a[7] = 8;
+            XposedBridge.invokeOriginalMethod(qc, null, a);
+        } catch (Throwable t) {
+            failed = true;
+            XposedBridge.log(TAG + "inject failed: " + t + " / " + t.getCause());
+        }
+    }
+
+    private static Object pluginIcon(Object fallback) {
+        try {
+            Class<?> sh = Class.forName("sh7", false, appCl);
+            Object set = XposedHelpers.getStaticObjectField(sh, "d");
+            Object ic = XposedHelpers.getObjectField(set, "P2");
+            if (ic != null) return ic;
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "icon failed: " + t);
+        }
+        return fallback;
+    }
+
+    private static Object makeFake(Object billing) throws Throwable {
+        Class<?> uc = Class.forName("sun.misc.Unsafe");
+        Field f = uc.getDeclaredField("theUnsafe");
+        f.setAccessible(true);
+        Object u = f.get(null);
+        Method alloc = uc.getMethod("allocateInstance", Class.class);
+        Object fake = alloc.invoke(u, billing.getClass());
+        XposedHelpers.setObjectField(fake, "name", "Plugins");
+        XposedHelpers.setIntField(fake, "ordinal", ((Enum<?>) billing).ordinal());
+        XposedHelpers.setObjectField(fake, "v",
+                pluginIcon(XposedHelpers.getObjectField(billing, "v")));
+        XposedHelpers.setIntField(fake, "w", XposedHelpers.getIntField(billing, "w"));
+        XposedHelpers.setObjectField(fake, "x", null);
+        return fake;
+    }
+
+    private static Object findUnit() {
+        try {
+            Class<?> k = Class.forName("kotlin.Unit", false, appCl);
+            return k.getField("INSTANCE").get(null);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static Object wrapClick(Class<?> type) {
+        if (!type.isInterface()) return null;
+        return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        if (method.getDeclaringClass() == Object.class) {
+                            switch (method.getName()) {
+                                case "hashCode": return System.identityHashCode(proxy);
+                                case "equals": return proxy == args[0];
+                                default: return "PluginsClick";
+                            }
+                        }
+                        final Activity a = activity.get();
+                        if (a != null) {
+                            a.runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() { PluginsUi.show(a); }
+                            });
+                        }
+                        return unit;
+                    }
+                });
+    }
+}
+EOF_H
+
+cat > $D/PluginsUi.java <<'EOF_U'
 package com.torip.claudeplugins;
 
 import android.animation.Animator;
@@ -10,6 +494,10 @@ import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -25,7 +513,10 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -43,23 +534,30 @@ import android.widget.Toast;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 import de.robv.android.xposed.XposedBridge;
 
 final class PluginsUi {
     static final int BG = 0xFF141414, CARD = 0xFF1F1F1E, STROKE = 0xFF2E2E2C,
             TEXT = 0xFFF2F1EE, SUB = 0xFFB4B3AE, DIM = 0xFF8E8D89, ACCENT = 0xFFD97757,
-            BLUE = 0xFF3B82F6, RED = 0xFFFF6B6B, MENU = 0xFF222222;
+            BLUE = 0xFF3B82F6, RED = 0xFFFF6B6B, GREEN = 0xFF4ADE80, MENU = 0xFF222222;
     private static final int MP = -1, WC = -2;
     static final int REQ = 7731;
     private static boolean showing = false;
@@ -69,6 +567,7 @@ final class PluginsUi {
     private final Activity a;
     private final float d;
     private final SharedPreferences prefs;
+    private final Map<String, TextView> stViews = new HashMap<String, TextView>();
     private Dialog dlg;
     private Slide root;
     private LinearLayout list;
@@ -78,6 +577,11 @@ final class PluginsUi {
     private float tx, ty;
     private int tab = 0;
     private boolean closing = false;
+
+    private FrameLayout detail;
+    private String detailDir;
+    private TextView detStatus, detLog;
+    private ScrollView detScroll;
 
     private PluginsUi(Activity a) {
         this.a = a;
@@ -113,7 +617,6 @@ final class PluginsUi {
 
     private View content() { return a.findViewById(android.R.id.content); }
 
-    // ================= icons =================
     static class Ic extends View {
         static final int BACK = 0, REFRESH = 1, FILE = 2, EQNOT = 3;
         final int type;
@@ -172,7 +675,6 @@ final class PluginsUi {
         }
     }
 
-    // ================= animated switch =================
     static class Sw extends View {
         boolean on;
         float prog;
@@ -218,7 +720,6 @@ final class PluginsUi {
         }
     }
 
-    // ================= root with edge-swipe back =================
     static class Slide extends FrameLayout {
         interface Host { void onDrag(float tx); void onRelease(float tx); }
         Host host;
@@ -286,7 +787,6 @@ final class PluginsUi {
         }
     }
 
-    // ================= data =================
     private static class Plugin {
         File file;
         String dir, name, version, desc, author;
@@ -311,16 +811,7 @@ final class PluginsUi {
             try {
                 File m = new File(f, "manifest.json");
                 if (m.exists()) {
-                    byte[] b = new byte[(int) m.length()];
-                    FileInputStream in = new FileInputStream(m);
-                    int off = 0;
-                    while (off < b.length) {
-                        int r = in.read(b, off, b.length - off);
-                        if (r < 0) break;
-                        off += r;
-                    }
-                    in.close();
-                    JSONObject j = new JSONObject(new String(b, "UTF-8"));
+                    JSONObject j = new JSONObject(new String(Loader.readBytes(m), "UTF-8"));
                     p.name = j.optString("name", p.dir);
                     p.version = j.optString("version", "?");
                     p.desc = j.optString("description", "");
@@ -333,7 +824,6 @@ final class PluginsUi {
         return out;
     }
 
-    // ================= import =================
     private void importUri(final Uri uri) {
         new Thread(() -> {
             try {
@@ -468,16 +958,100 @@ final class PluginsUi {
         }
     }
 
-    // ================= screen =================
+    private Uri exportToDownloads(String sub, String name, String mime, byte[] data) throws Exception {
+        ContentValues v = new ContentValues();
+        v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+        if (mime != null) v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+        v.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                Environment.DIRECTORY_DOWNLOADS + (sub.length() > 0 ? "/" + sub : ""));
+        ContentResolver cr = a.getContentResolver();
+        Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+        if (uri == null) throw new Exception("не удалось создать файл в Загрузках");
+        OutputStream os = cr.openOutputStream(uri);
+        try {
+            os.write(data);
+        } finally {
+            os.close();
+        }
+        return uri;
+    }
+
+    private byte[] zipDir(File dir) throws Exception {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        ZipOutputStream z = new ZipOutputStream(bo);
+        addZip(z, dir, dir.getName() + "/");
+        z.close();
+        return bo.toByteArray();
+    }
+
+    private void addZip(ZipOutputStream z, File f, String path) throws Exception {
+        File[] cs = f.listFiles();
+        if (cs == null) return;
+        for (File c : cs) {
+            if (c.isDirectory()) {
+                addZip(z, c, path + c.getName() + "/");
+            } else {
+                z.putNextEntry(new ZipEntry(path + c.getName()));
+                z.write(Loader.readBytes(c));
+                z.closeEntry();
+            }
+        }
+    }
+
+    private void openWith(Plugin p) {
+        try {
+            File f = new File(p.file, "main.js");
+            if (!f.exists()) { toast("Нет main.js"); return; }
+            Uri u = exportToDownloads("ClaudePlugins", p.dir + ".js", null, Loader.readBytes(f));
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(u, "text/plain");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            a.startActivity(Intent.createChooser(i, "Открыть с помощью"));
+            toast("Копия в Загрузки/ClaudePlugins");
+        } catch (Throwable t) {
+            toast("Не удалось: " + t.getMessage());
+        }
+    }
+
+    private void sharePlugin(Plugin p) {
+        try {
+            Uri u = exportToDownloads("ClaudePlugins", p.dir + ".zip", "application/zip", zipDir(p.file));
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType("application/zip");
+            i.putExtra(Intent.EXTRA_STREAM, u);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            a.startActivity(Intent.createChooser(i, "Поделиться"));
+        } catch (Throwable t) {
+            toast("Не удалось: " + t.getMessage());
+        }
+    }
+
+    private void copyLog(Plugin p) {
+        String log = Loader.readLog(a, p.dir);
+        if (log.length() == 0) { toast("Лог пуст"); return; }
+        ClipboardManager cm = (ClipboardManager) a.getSystemService(Context.CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(ClipData.newPlainText(p.name + " log", log));
+        toast("Лог скопирован");
+    }
+
+    private void saveLog(Plugin p) {
+        String log = Loader.readLog(a, p.dir);
+        if (log.length() == 0) { toast("Лог пуст"); return; }
+        try {
+            String name = p.dir + "-log-"
+                    + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()) + ".txt";
+            exportToDownloads("", name, "text/plain", log.getBytes("UTF-8"));
+            toast("Сохранено в Загрузки: " + name);
+        } catch (Throwable t) {
+            toast("Не удалось: " + t.getMessage());
+        }
+    }
+
     private void open() {
         dlg = new Dialog(a, android.R.style.Theme_DeviceDefault_NoActionBar) {
             @Override
             public void onBackPressed() {
-                if (popup != null && popup.isShowing()) {
-                    popup.dismiss();
-                    return;
-                }
-                closeScreen();
+                PluginsUi.this.onBack();
             }
         };
         Window w = dlg.getWindow();
@@ -497,12 +1071,14 @@ final class PluginsUi {
         root.host = new Slide.Host() {
             @Override
             public void onDrag(float t) {
+                if (detail != null) return;
                 root.setTranslationX(t);
                 parallax(1f - t / width());
             }
 
             @Override
             public void onRelease(float t) {
+                if (detail != null) return;
                 if (t > width() / 3f) {
                     closeScreen();
                 } else {
@@ -583,6 +1159,18 @@ final class PluginsUi {
         content().setTranslationX(-width() * 0.3f * Math.max(0f, Math.min(1f, k)));
     }
 
+    private void onBack() {
+        if (popup != null && popup.isShowing()) {
+            popup.dismiss();
+            return;
+        }
+        if (detail != null) {
+            closeDetail();
+            return;
+        }
+        closeScreen();
+    }
+
     private void closeScreen() {
         if (closing) return;
         closing = true;
@@ -603,7 +1191,7 @@ final class PluginsUi {
         t.setGravity(Gravity.CENTER);
         h.addView(t, new FrameLayout.LayoutParams(MP, MP));
         final View back = hit(Ic.BACK);
-        back.setOnClickListener(v -> closeScreen());
+        back.setOnClickListener(v -> onBack());
         h.addView(back, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.START));
         final FrameLayout ref = hit(Ic.REFRESH);
         ref.setOnClickListener(v -> {
@@ -622,7 +1210,6 @@ final class PluginsUi {
         return f;
     }
 
-    // ================= tabs =================
     private View buildTabs() {
         final FrameLayout box = new FrameLayout(a);
         GradientDrawable bd = new GradientDrawable();
@@ -706,7 +1293,6 @@ final class PluginsUi {
         }
     }
 
-    // ================= widgets =================
     private void press(View v) {
         v.setOnTouchListener((x, e) -> {
             switch (e.getActionMasked()) {
@@ -757,6 +1343,23 @@ final class PluginsUi {
         return t;
     }
 
+    private <T extends View> T padTop(T v, int dpv) {
+        v.setPadding(v.getPaddingLeft(), dp(dpv), v.getPaddingRight(), v.getPaddingBottom());
+        return v;
+    }
+
+    private LinearLayout box() {
+        LinearLayout l = new LinearLayout(a);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(16), dp(14), dp(16), dp(14));
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(CARD);
+        g.setCornerRadius(dp(20));
+        g.setStroke(dp(1), STROKE);
+        l.setBackground(g);
+        return l;
+    }
+
     private View iconBox(int size, int iconSize) {
         FrameLayout b = new FrameLayout(a);
         GradientDrawable g = new GradientDrawable();
@@ -769,9 +1372,30 @@ final class PluginsUi {
         return b;
     }
 
-    // ================= list =================
+    private void applyStatus(TextView t, String dir) {
+        String s = Loader.status(dir);
+        if ("running".equals(s)) {
+            t.setText("● Запущен");
+            t.setTextColor(GREEN);
+            t.setVisibility(View.VISIBLE);
+        } else if ("error".equals(s)) {
+            t.setText("● Ошибка: " + Loader.error(dir));
+            t.setTextColor(RED);
+            t.setVisibility(View.VISIBLE);
+        } else {
+            t.setVisibility(View.GONE);
+        }
+    }
+
+    private void updateStatus(String dir) {
+        TextView t = stViews.get(dir);
+        if (t != null) applyStatus(t, dir);
+        if (detail != null && dir.equals(detailDir)) refreshDetail();
+    }
+
     private void fill() {
         list.removeAllViews();
+        stViews.clear();
         List<Plugin> ps = load();
         if (ps.isEmpty()) {
             LinearLayout e = new LinearLayout(a);
@@ -823,6 +1447,13 @@ final class PluginsUi {
         col.setOrientation(LinearLayout.VERTICAL);
         col.addView(tv(p.name, 16, TEXT, true));
         col.addView(tv("Версия: " + p.version, 12, DIM, false));
+        TextView st = tv("", 12, DIM, false);
+        st.setMaxLines(2);
+        st.setEllipsize(TextUtils.TruncateAt.END);
+        st.setPadding(0, dp(2), 0, 0);
+        applyStatus(st, p.dir);
+        stViews.put(p.dir, st);
+        col.addView(st);
         if (p.desc.length() > 0) {
             TextView ds = tv(p.desc, 14, SUB, false);
             ds.setPadding(0, dp(4), 0, 0);
@@ -840,10 +1471,16 @@ final class PluginsUi {
 
         final String key = "en:" + p.dir;
         final Sw sw = new Sw(a, prefs.getBoolean(key, false));
-        sw.change = () -> prefs.edit().putBoolean(key, sw.on).apply();
+        sw.change = () -> {
+            prefs.edit().putBoolean(key, sw.on).apply();
+            Context ac = a.getApplicationContext();
+            if (sw.on) Loader.start(ac, p.dir, () -> updateStatus(p.dir));
+            else Loader.stop(ac, p.dir, () -> updateStatus(p.dir));
+        };
         c.addView(sw, new LinearLayout.LayoutParams(WC, WC));
 
         press(c);
+        c.setOnClickListener(v -> openDetail(p));
         c.setOnLongClickListener(v -> {
             showMenu(p, c);
             return true;
@@ -851,7 +1488,124 @@ final class PluginsUi {
         return c;
     }
 
-    // ================= long-press menu =================
+    private void openDetail(final Plugin p) {
+        if (detail != null) return;
+        detailDir = p.dir;
+        final FrameLayout d0 = new FrameLayout(a);
+        d0.setBackgroundColor(BG);
+        d0.setClickable(true);
+
+        LinearLayout col = new LinearLayout(a);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        FrameLayout h = new FrameLayout(a);
+        TextView t = new TextView(a);
+        t.setText(p.name);
+        t.setTextColor(0xFFF6F5F2);
+        t.setTextSize(20);
+        t.setTypeface(Typeface.create(Typeface.SERIF, Typeface.BOLD));
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setPadding(dp(56), 0, dp(56), 0);
+        h.addView(t, new FrameLayout.LayoutParams(MP, MP));
+        View back = hit(Ic.BACK);
+        back.setOnClickListener(v -> closeDetail());
+        h.addView(back, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.START));
+        final FrameLayout ref = hit(Ic.REFRESH);
+        ref.setOnClickListener(v -> {
+            ref.getChildAt(0).animate().rotationBy(360).setDuration(450).start();
+            refreshDetail();
+        });
+        h.addView(ref, new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.END));
+        col.addView(h, new LinearLayout.LayoutParams(MP, dp(56)));
+
+        detScroll = new ScrollView(a);
+        detScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout body = new LinearLayout(a);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), dp(8), dp(16), dp(16));
+
+        LinearLayout info = box();
+        info.addView(tv(p.name, 18, TEXT, true));
+        info.addView(tv("Версия: " + p.version, 13, DIM, false));
+        if (p.author.length() > 0) info.addView(padTop(tv("Автор: " + p.author, 13, DIM, false), 2));
+        if (p.desc.length() > 0) info.addView(padTop(tv(p.desc, 15, SUB, false), 8));
+        detStatus = padTop(tv("", 13, SUB, false), 10);
+        info.addView(detStatus);
+        body.addView(info, new LinearLayout.LayoutParams(MP, WC));
+
+        TextView lab = tv("Лог", 13, DIM, true);
+        LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(WC, WC);
+        ll.topMargin = dp(20);
+        ll.bottomMargin = dp(8);
+        ll.leftMargin = dp(4);
+        body.addView(lab, ll);
+
+        detLog = tv("", 12, TEXT, false);
+        detLog.setTypeface(Typeface.MONOSPACE);
+        detLog.setTextIsSelectable(true);
+        detLog.setPadding(dp(12), dp(12), dp(12), dp(12));
+        GradientDrawable lg = new GradientDrawable();
+        lg.setColor(0xFF191918);
+        lg.setCornerRadius(dp(16));
+        lg.setStroke(dp(1), STROKE);
+        detLog.setBackground(lg);
+        body.addView(detLog, new LinearLayout.LayoutParams(MP, WC));
+
+        detScroll.addView(body, new FrameLayout.LayoutParams(MP, WC));
+        col.addView(detScroll, new LinearLayout.LayoutParams(MP, 0, 1f));
+
+        LinearLayout bar = new LinearLayout(a);
+        bar.setPadding(dp(16), dp(8), dp(16), dp(16));
+        LinearLayout.LayoutParams l1 = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        l1.rightMargin = dp(5);
+        LinearLayout.LayoutParams l2 = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        l2.leftMargin = dp(5);
+        bar.addView(pill("Скачать лог", false, () -> saveLog(p)), l1);
+        bar.addView(pill("Скопировать лог", true, () -> copyLog(p)), l2);
+        col.addView(bar, new LinearLayout.LayoutParams(MP, WC));
+
+        d0.addView(col, new FrameLayout.LayoutParams(MP, MP));
+        detail = d0;
+        root.addView(d0, root.indexOfChild(scrim), new FrameLayout.LayoutParams(MP, MP));
+        d0.setTranslationX(width());
+        d0.animate().translationX(0).setDuration(280)
+                .setInterpolator(new DecelerateInterpolator(1.6f)).start();
+        refreshDetail();
+    }
+
+    private void refreshDetail() {
+        if (detail == null || detStatus == null || detLog == null) return;
+        String s = Loader.status(detailDir);
+        if ("running".equals(s)) {
+            detStatus.setText("Состояние: запущен");
+            detStatus.setTextColor(GREEN);
+        } else if ("error".equals(s)) {
+            detStatus.setText("Состояние: ошибка — " + Loader.error(detailDir));
+            detStatus.setTextColor(RED);
+        } else {
+            detStatus.setText("Состояние: остановлен");
+            detStatus.setTextColor(SUB);
+        }
+        String log = Loader.readLog(a, detailDir);
+        detLog.setText(log.length() == 0 ? "Лог пуст" : log);
+        final ScrollView sv = detScroll;
+        if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+    }
+
+    private void closeDetail() {
+        final FrameLayout d0 = detail;
+        if (d0 == null) return;
+        detail = null;
+        detStatus = null;
+        detLog = null;
+        detScroll = null;
+        d0.animate().translationX(width()).setDuration(240)
+                .setInterpolator(new DecelerateInterpolator(1.4f))
+                .withEndAction(() -> root.removeView(d0)).start();
+    }
+
     private void showMenu(final Plugin p, final View cardView) {
         final LinearLayout m = new LinearLayout(a);
         m.setOrientation(LinearLayout.VERTICAL);
@@ -861,8 +1615,8 @@ final class PluginsUi {
         m.setBackground(g);
         m.setPadding(0, dp(8), 0, dp(8));
 
-        m.addView(item("Открыть с помощью…", TEXT, () -> toast("Ещё не сделано")));
-        m.addView(item("Поделиться", TEXT, () -> toast("Ещё не сделано")));
+        m.addView(item("Открыть с помощью…", TEXT, () -> openWith(p)));
+        m.addView(item("Поделиться", TEXT, () -> sharePlugin(p)));
         View div = new View(a);
         div.setBackgroundColor(0xFF3A3A38);
         LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(MP, dp(1));
@@ -924,7 +1678,10 @@ final class PluginsUi {
                 .setMessage(p.name)
                 .setNegativeButton("Отмена", null)
                 .setPositiveButton("Удалить", (di, i) -> collapse(cardView, () -> {
+                    Loader.deleteData(a.getApplicationContext(), p.dir);
+                    prefs.edit().remove("en:" + p.dir).apply();
                     deleteDir(p.file);
+                    stViews.remove(p.dir);
                     list.removeView(cardView);
                     if (list.getChildCount() == 0) fill();
                 })).show();
@@ -959,45 +1716,39 @@ final class PluginsUi {
         f.delete();
     }
 }
-EOF
+EOF_U
 
 python3 - <<'PY'
-p = "/data/data/com.termux/files/home/claude-plugins/app/src/main/java/com/torip/claudeplugins/Hook.java"
+p = "/data/data/com.termux/files/home/claude-plugins/app/build.gradle"
 s = open(p, encoding="utf-8").read()
-s = s.replace('"v11 loaded"', '"v12 loaded"', 1)
-s = s.replace("import android.app.Activity;", "import android.app.Activity;\nimport android.content.Intent;", 1)
-s = s.replace("        hookItem();\n    }", "        hookItem();\n        hookResult();\n    }", 1)
-fn = '''    private void hookResult() {
-        try {
-            XposedHelpers.findAndHookMethod(Activity.class, "onActivityResult",
-                    int.class, int.class, Intent.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            try {
-                                PluginsUi.onResult((Activity) p.thisObject,
-                                        (Integer) p.args[0], (Integer) p.args[1], (Intent) p.args[2]);
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + "result failed: " + t);
-                            }
-                        }
-                    });
-            XposedBridge.log(TAG + "result hook ok");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + "result hook failed: " + t);
-        }
-    }
-
-'''
-s = s.replace("    private void hookItem() {", fn + "    private void hookItem() {", 1)
+if "quickjs-android" not in s:
+    i = s.index("dependencies {")
+    j = s.index("\n", i)
+    s = s[:j+1] + "    implementation 'app.cash.quickjs:quickjs-android:0.9.2'\n" + s[j+1:]
+if "useLegacyPackaging" not in s:
+    s = s.replace("android {\n", "android {\n    packaging {\n        jniLibs {\n            useLegacyPackaging = false\n        }\n    }\n", 1)
 open(p, "w", encoding="utf-8").write(s)
 PY
+grep -n "quickjs\|useLegacy" app/build.gradle
 
-grep -c "v12 loaded" app/src/main/java/com/torip/claudeplugins/Hook.java
+cat > /sdcard/Download/test-plugin.js <<'EOF_T'
+claude.log("привет из плагина");
+var n = Number(claude.storage.get("count") || 0) + 1;
+claude.storage.set("count", n);
+claude.toast("Плагин запущен, раз: " + n);
+EOF_T
 
-git add -A && git commit -qm "v12: animations, tabs, slide transition, add file" && git push -q
+git add -A && git commit -qm "v13: quickjs loader, details screen, native icon, open/share" && git push -q
 sleep 15
 RID=$(gh run list -L1 --json databaseId -q '.[0].databaseId')
 gh run watch --exit-status $RID
 rm -rf ~/apk && gh run download $RID -n module-debug -D ~/apk
 rm -rf ~/chk2 && mkdir ~/chk2 && unzip -o -q ~/apk/app-debug.apk -d ~/chk2
-grep -a -c "v12 loaded" ~/chk2/classes*.dex
+unzip -v ~/apk/app-debug.apk | grep "\.so"
+if grep -a -q "v13 loaded" ~/chk2/classes*.dex; then
+  su -c "pm install -r $HOME/apk/app-debug.apk"
+  su -c "am force-stop com.anthropic.claude"
+  echo "ГОТОВО: v13 установлена"
+else
+  echo "СТОП: в APK нет v13, не ставлю"
+fi

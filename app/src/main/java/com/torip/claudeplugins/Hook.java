@@ -29,7 +29,7 @@ public class Hook implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
         appCl = lpp.classLoader;
-        XposedBridge.log(TAG + "v12 loaded");
+        XposedBridge.log(TAG + "v13 loaded");
         hookActivity();
         hookItem();
         hookResult();
@@ -41,7 +41,13 @@ public class Hook implements IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(c, "onResume", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam p) {
-                    activity = new WeakReference<>((Activity) p.thisObject);
+                    Activity a = (Activity) p.thisObject;
+                    activity = new WeakReference<>(a);
+                    try {
+                        Loader.startAllOnce(a);
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + "loader failed: " + t);
+                    }
                 }
             });
         } catch (Throwable t) {
@@ -115,6 +121,18 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
+    private static Object pluginIcon(Object fallback) {
+        try {
+            Class<?> sh = Class.forName("sh7", false, appCl);
+            Object set = XposedHelpers.getStaticObjectField(sh, "d");
+            Object ic = XposedHelpers.getObjectField(set, "P2");
+            if (ic != null) return ic;
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "icon failed: " + t);
+        }
+        return fallback;
+    }
+
     private static Object makeFake(Object billing) throws Throwable {
         Class<?> uc = Class.forName("sun.misc.Unsafe");
         Field f = uc.getDeclaredField("theUnsafe");
@@ -124,7 +142,8 @@ public class Hook implements IXposedHookLoadPackage {
         Object fake = alloc.invoke(u, billing.getClass());
         XposedHelpers.setObjectField(fake, "name", "Plugins");
         XposedHelpers.setIntField(fake, "ordinal", ((Enum<?>) billing).ordinal());
-        XposedHelpers.setObjectField(fake, "v", XposedHelpers.getObjectField(billing, "v"));
+        XposedHelpers.setObjectField(fake, "v",
+                pluginIcon(XposedHelpers.getObjectField(billing, "v")));
         XposedHelpers.setIntField(fake, "w", XposedHelpers.getIntField(billing, "w"));
         XposedHelpers.setObjectField(fake, "x", null);
         return fake;
