@@ -24,6 +24,8 @@ public class Hook implements IXposedHookLoadPackage {
     private static Method qc;
     private static Object fakeItem, unit, lastRoute, content, noopClick;
     private static boolean failed = false;
+    private static Object provider, inner;
+    private static Method wdc;
     private static boolean pluginsMode = false;
     private static boolean inPrivacy = false;
     private static long pluginsSince = 0;
@@ -32,10 +34,11 @@ public class Hook implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
         appCl = lpp.classLoader;
-        XposedBridge.log(TAG + "v7 loaded");
+        XposedBridge.log(TAG + "v8 loaded");
         hookItem();
         hookPrivacy();
         hookScaffold();
+        hookProvider();
     }
 
     // ---------- root list: item "Plugins" ----------
@@ -242,16 +245,7 @@ public class Hook implements IXposedHookLoadPackage {
                             return objMethod(proxy, method, args, "PluginsContent");
                         }
                         try {
-                            Object[] a = new Object[8];
-                            a[0] = fakeItem;
-                            a[1] = lastRoute;
-                            a[2] = getNoop();
-                            a[3] = null;
-                            a[4] = "Тест: экран Плагины";
-                            a[5] = args[1];
-                            a[6] = 0;
-                            a[7] = 8;
-                            XposedBridge.invokeOriginalMethod(qc, null, a);
+                            drawWithProvider(args[1]);
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + "content failed: " + t + " / " + t.getCause());
                         }
@@ -263,6 +257,83 @@ public class Hook implements IXposedHookLoadPackage {
         content = k.newInstance(0x50C0DE, true, lambda);
         XposedBridge.log(TAG + "content created");
         return content;
+    }
+
+    private void hookProvider() {
+        try {
+            Class<?> wd = XposedHelpers.findClass("wd10", appCl);
+            int n = 0;
+            for (Method m : wd.getDeclaredMethods()) {
+                Class<?>[] pt = m.getParameterTypes();
+                if (m.getName().equals("c") && pt.length == 4 && pt[0].getName().equals("rf10")) {
+                    m.setAccessible(true);
+                    wdc = m;
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            try {
+                                Object rf = p.args[0];
+                                if (rf == null || rf == provider) return;
+                                Object g = XposedHelpers.getObjectField(rf, "g");
+                                if (g != null && g.getClass().getName().equals("xos")) {
+                                    provider = rf;
+                                    XposedBridge.log(TAG + "provider captured");
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    });
+                    n++;
+                }
+            }
+            XposedBridge.log(TAG + "provider hooks: " + n);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "provider hook failed: " + t);
+        }
+    }
+
+    private static void drawCard(Object composer) {
+        try {
+            Object[] a = new Object[8];
+            a[0] = fakeItem;
+            a[1] = lastRoute;
+            a[2] = getNoop();
+            a[3] = null;
+            a[4] = "Тест: экран Плагины";
+            a[5] = composer;
+            a[6] = 0;
+            a[7] = 8;
+            XposedBridge.invokeOriginalMethod(qc, null, a);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "card failed: " + t + " / " + t.getCause());
+        }
+    }
+
+    private static void drawWithProvider(Object composer) {
+        try {
+            if (provider == null || wdc == null) {
+                XposedBridge.log(TAG + "no provider, drawing bare");
+                drawCard(composer);
+                return;
+            }
+            if (inner == null) {
+                Class<?> njl = Class.forName("njl", false, appCl);
+                inner = Proxy.newProxyInstance(njl.getClassLoader(), new Class<?>[]{njl},
+                        new InvocationHandler() {
+                            @Override
+                            public Object invoke(Object proxy, Method method, Object[] args) {
+                                if (method.getDeclaringClass() == Object.class) {
+                                    return objMethod(proxy, method, args, "PluginsInner");
+                                }
+                                drawCard(args[0]);
+                                return unit;
+                            }
+                        });
+            }
+            XposedBridge.invokeOriginalMethod(wdc, null, new Object[]{provider, inner, composer, 56});
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "provider draw failed: " + t + " / " + t.getCause());
+        }
     }
 
     private static Object getNoop() {
