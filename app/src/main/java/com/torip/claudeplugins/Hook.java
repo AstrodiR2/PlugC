@@ -60,7 +60,8 @@ public class Hook implements IXposedHookLoadPackage {
             int n = 0;
             for (Method m : c.getDeclaredMethods()) {
                 Class<?>[] pt = m.getParameterTypes();
-                if (m.getName().equals("c") && pt.length == 8 && pt[0].getName().equals("defpackage.m090")) {
+                XposedBridge.log(TAG + "q." + m.getName() + " argc=" + pt.length + " arg0=" + (pt.length > 0 ? pt[0].getName() : "-"));
+                if (m.getName().equals("c") && pt.length == 8 && pt[0].getName().endsWith("m090")) {
                     XposedBridge.hookMethod(m, new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam p) {
