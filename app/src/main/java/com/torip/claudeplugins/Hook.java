@@ -1,11 +1,11 @@
 package com.torip.claudeplugins;
 
-import android.app.Activity;
-import android.widget.Toast;
+import android.os.SystemClock;
 
-import java.lang.ref.WeakReference;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 
@@ -18,46 +18,40 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class Hook implements IXposedHookLoadPackage {
     private static final String TAG = "ClaudePlugins: ";
     private static final String PKG = "com.anthropic.claude";
+    private static final int PRIVACY_ORDINAL = 12;
 
-    private static volatile WeakReference<Activity> activity = new WeakReference<>(null);
-    private static Object fakeItem = null;
-    private static Object unit = null;
+    private static ClassLoader appCl;
+    private static Method qc;
+    private static Object fakeItem, unit, lastRoute, content, noopClick;
     private static boolean failed = false;
+    private static boolean pluginsMode = false;
+    private static boolean inPrivacy = false;
+    private static long pluginsSince = 0;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
-        XposedBridge.log(TAG + "v4 loaded");
-        hookActivity(lpp.classLoader);
-        hookItem(lpp.classLoader);
+        appCl = lpp.classLoader;
+        XposedBridge.log(TAG + "v5 loaded");
+        hookItem();
+        hookPrivacy();
+        hookScaffold();
     }
 
-    private void hookActivity(ClassLoader cl) {
+    // ---------- root list: item "Plugins" ----------
+    private void hookItem() {
         try {
-            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.mainactivity.MainActivity", cl);
-            XposedHelpers.findAndHookMethod(c, "onResume", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam p) {
-                    activity = new WeakReference<>((Activity) p.thisObject);
-                }
-            });
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + "activity hook failed: " + t);
-        }
-    }
-
-    private void hookItem(final ClassLoader cl) {
-        try {
-            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.settings.q", cl);
+            Class<?> c = XposedHelpers.findClass("com.anthropic.claude.settings.q", appCl);
             int n = 0;
             for (final Method m : c.getDeclaredMethods()) {
                 Class<?>[] pt = m.getParameterTypes();
                 if (m.getName().equals("c") && pt.length == 8 && pt[0].getName().endsWith("m090")) {
                     m.setAccessible(true);
+                    qc = m;
                     XposedBridge.hookMethod(m, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam p) {
-                            onItem(m, p.args, cl);
+                            onItem(p.args);
                         }
                     });
                     n++;
@@ -69,23 +63,31 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void onItem(Method m, Object[] orig, ClassLoader cl) {
+    private static void onItem(Object[] orig) {
         if (failed) return;
         try {
             Object item = orig[0];
-            if (!(item instanceof Enum) || !"Billing".equals(((Enum<?>) item).name())) return;
+            if (!(item instanceof Enum)) return;
+            String nm = ((Enum<?>) item).name();
+            if (nm.equals("Plugins")) return;
+            lastRoute = orig[1];
+            if (nm.equals("Profile") && pluginsMode
+                    && SystemClock.uptimeMillis() - pluginsSince > 1500) {
+                pluginsMode = false;
+            }
+            if (!nm.equals("Billing")) return;
 
             if (fakeItem == null) fakeItem = makeFake(item);
-            if (unit == null) unit = findUnit(cl);
+            if (unit == null) unit = findUnit();
 
             Object[] a = orig.clone();
             a[0] = fakeItem;
-            a[2] = wrapClick(m.getParameterTypes()[2], orig[2]);
+            a[2] = wrapClick(qc.getParameterTypes()[2], orig[2]);
             a[3] = null;
             a[4] = "Плагины";
             a[6] = 0;
             a[7] = 8;
-            XposedBridge.invokeOriginalMethod(m, null, a);
+            XposedBridge.invokeOriginalMethod(qc, null, a);
         } catch (Throwable t) {
             failed = true;
             XposedBridge.log(TAG + "inject failed: " + t + " / " + t.getCause());
@@ -100,7 +102,8 @@ public class Hook implements IXposedHookLoadPackage {
         Method alloc = uc.getMethod("allocateInstance", Class.class);
         Object fake = alloc.invoke(u, billing.getClass());
         XposedHelpers.setObjectField(fake, "name", "Plugins");
-        XposedHelpers.setIntField(fake, "ordinal", ((Enum<?>) billing).ordinal());
+        // ordinal 12 = Privacy: native click navigates to Privacy route
+        XposedHelpers.setIntField(fake, "ordinal", PRIVACY_ORDINAL);
         XposedHelpers.setObjectField(fake, "v", XposedHelpers.getObjectField(billing, "v"));
         XposedHelpers.setIntField(fake, "w", XposedHelpers.getIntField(billing, "w"));
         XposedHelpers.setObjectField(fake, "x", null);
@@ -108,42 +111,172 @@ public class Hook implements IXposedHookLoadPackage {
         return fake;
     }
 
-    private static Object findUnit(ClassLoader cl) {
+    private static Object findUnit() {
         try {
-            Class<?> k = Class.forName("kotlin.Unit", false, cl);
+            Class<?> k = Class.forName("kotlin.Unit", false, appCl);
             return k.getField("INSTANCE").get(null);
         } catch (Throwable t) {
             return null;
         }
     }
 
-    private static Object wrapClick(Class<?> type, Object original) {
-        if (!type.isInterface()) {
-            XposedBridge.log(TAG + "click type not interface: " + type.getName());
-            return original;
+    private static Object objMethod(Object proxy, Method method, Object[] args, String name) {
+        switch (method.getName()) {
+            case "hashCode": return System.identityHashCode(proxy);
+            case "equals": return proxy == args[0];
+            default: return name;
         }
+    }
+
+    // click on root item: set flag, then run the original (native) navigation
+    private static Object wrapClick(Class<?> type, final Object original) {
+        if (!type.isInterface()) return original;
         return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                        if (method.getDeclaringClass() == Object.class) {
+                            return objMethod(proxy, method, args, "PluginsClick");
+                        }
+                        pluginsMode = true;
+                        pluginsSince = SystemClock.uptimeMillis();
+                        try {
+                            return method.invoke(original, args);
+                        } catch (InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    }
+                });
+    }
+
+    // ---------- Privacy screen -> our screen ----------
+    private void hookPrivacy() {
+        try {
+            Class<?> c = XposedHelpers.findClass("ywz", appCl);
+            int n = 0;
+            for (Method m : c.getDeclaredMethods()) {
+                if (m.getName().equals("e") && m.getParameterTypes().length == 10) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            inPrivacy = true;
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam p) {
+                            inPrivacy = false;
+                        }
+                    });
+                    n++;
+                }
+            }
+            XposedBridge.log(TAG + "privacy hooks: " + n);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "privacy hook failed: " + t);
+        }
+    }
+
+    private void hookScaffold() {
+        try {
+            Class<?> c = XposedHelpers.findClass("p090", appCl);
+            int n = 0;
+            for (final Method m : c.getDeclaredMethods()) {
+                Class<?>[] pt = m.getParameterTypes();
+                if (m.getName().equals("c") && pt.length == 13
+                        && pt[0] == String.class && pt[9].getName().equals("r4d")) {
+                    final Class<?> backType = pt[1];
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam p) {
+                            if (!pluginsMode || !inPrivacy || failed
+                                    || fakeItem == null || lastRoute == null || qc == null) return;
+                            try {
+                                p.args[0] = "Плагины";
+                                p.args[1] = wrapBack(backType, p.args[1]);
+                                p.args[9] = getContent();
+                            } catch (Throwable t) {
+                                failed = true;
+                                XposedBridge.log(TAG + "scaffold failed: " + t + " / " + t.getCause());
+                            }
+                        }
+                    });
+                    n++;
+                }
+            }
+            XposedBridge.log(TAG + "scaffold hooks: " + n);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "scaffold hook failed: " + t);
+        }
+    }
+
+    private static Object wrapBack(Class<?> type, final Object original) {
+        if (original == null || !type.isInterface()) return original;
+        return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                        if (method.getDeclaringClass() == Object.class) {
+                            return objMethod(proxy, method, args, "PluginsBack");
+                        }
+                        pluginsMode = false;
+                        try {
+                            return method.invoke(original, args);
+                        } catch (InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    }
+                });
+    }
+
+    // our content: r4d wrapping a pjl lambda (zrx scope, composer, int)
+    private static Object getContent() throws Throwable {
+        if (content != null) return content;
+        Class<?> pjl = Class.forName("pjl", false, appCl);
+        Class<?> r4d = Class.forName("r4d", false, appCl);
+        Object lambda = Proxy.newProxyInstance(pjl.getClassLoader(), new Class<?>[]{pjl},
                 new InvocationHandler() {
                     @Override
                     public Object invoke(Object proxy, Method method, Object[] args) {
                         if (method.getDeclaringClass() == Object.class) {
-                            switch (method.getName()) {
-                                case "hashCode": return System.identityHashCode(proxy);
-                                case "equals": return proxy == args[0];
-                                default: return "PluginsClick";
-                            }
+                            return objMethod(proxy, method, args, "PluginsContent");
                         }
-                        final Activity a = activity.get();
-                        if (a != null) {
-                            a.runOnUiThread(new Runnable() {
-                                @Override
-                                public void run() {
-                                    Toast.makeText(a, "Плагины", Toast.LENGTH_SHORT).show();
-                                }
-                            });
+                        try {
+                            Object[] a = new Object[8];
+                            a[0] = fakeItem;
+                            a[1] = lastRoute;
+                            a[2] = getNoop();
+                            a[3] = null;
+                            a[4] = "Тест: экран Плагины";
+                            a[5] = args[1];
+                            a[6] = 0;
+                            a[7] = 8;
+                            XposedBridge.invokeOriginalMethod(qc, null, a);
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + "content failed: " + t + " / " + t.getCause());
                         }
                         return unit;
                     }
                 });
+        Constructor<?> k = r4d.getDeclaredConstructor(int.class, boolean.class, Object.class);
+        k.setAccessible(true);
+        content = k.newInstance(0x50C0DE, true, lambda);
+        XposedBridge.log(TAG + "content created");
+        return content;
+    }
+
+    private static Object getNoop() {
+        if (noopClick != null) return noopClick;
+        Class<?> type = qc.getParameterTypes()[2];
+        noopClick = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        if (method.getDeclaringClass() == Object.class) {
+                            return objMethod(proxy, method, args, "Noop");
+                        }
+                        return unit;
+                    }
+                });
+        return noopClick;
     }
 }
