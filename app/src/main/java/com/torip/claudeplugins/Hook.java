@@ -32,7 +32,7 @@ public class Hook implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
         appCl = lpp.classLoader;
-        XposedBridge.log(TAG + "v5 loaded");
+        XposedBridge.log(TAG + "v6 loaded");
         hookItem();
         hookPrivacy();
         hookScaffold();
@@ -188,7 +188,8 @@ public class Hook implements IXposedHookLoadPackage {
                     XposedBridge.hookMethod(m, new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam p) {
-                            if (!pluginsMode || !inPrivacy || failed
+                            XposedBridge.log(TAG + "scaffold call title=" + p.args[0] + " mode=" + pluginsMode + " priv=" + inPrivacy + " fake=" + (fakeItem != null) + " route=" + (lastRoute != null));
+                            if (!pluginsMode || failed
                                     || fakeItem == null || lastRoute == null || qc == null) return;
                             try {
                                 p.args[0] = "Плагины";
