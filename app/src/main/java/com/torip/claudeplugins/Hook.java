@@ -24,6 +24,7 @@ public class Hook implements IXposedHookLoadPackage {
     private static Method qc;
     private static Object fakeItem, unit, lastRoute, content, noopClick;
     private static boolean failed = false;
+    private static boolean stackLogged = false;
     private static Object provider, inner;
     private static Method wdc;
     private static boolean pluginsMode = false;
@@ -34,7 +35,7 @@ public class Hook implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
         if (!PKG.equals(lpp.packageName)) return;
         appCl = lpp.classLoader;
-        XposedBridge.log(TAG + "v8 loaded");
+        XposedBridge.log(TAG + "v9 loaded");
         hookItem();
         hookPrivacy();
         hookScaffold();
@@ -74,6 +75,7 @@ public class Hook implements IXposedHookLoadPackage {
             String nm = ((Enum<?>) item).name();
             if (nm.equals("Plugins")) return;
             lastRoute = orig[1];
+            if (nm.equals("Profile") && !stackLogged) { stackLogged = true; logStack(); }
             if (nm.equals("Profile") && pluginsMode
                     && SystemClock.uptimeMillis() - pluginsSince > 1500) {
                 pluginsMode = false;
@@ -334,6 +336,22 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + "provider draw failed: " + t + " / " + t.getCause());
         }
+    }
+
+    private static void logStack() {
+        StackTraceElement[] st = new Throwable().getStackTrace();
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (StackTraceElement e : st) {
+            String c = e.getClassName();
+            if (c.startsWith("android.") || c.startsWith("java.")
+                    || c.startsWith("de.robv") || c.startsWith("LSPHooker")
+                    || c.startsWith("com.torip") || c.startsWith("kotlin.")
+                    || c.startsWith("dalvik.") || c.startsWith("org.lsposed")) continue;
+            sb.append("\n    ").append(c).append('.').append(e.getMethodName());
+            if (++n >= 30) break;
+        }
+        XposedBridge.log(TAG + "STACK:" + sb);
     }
 
     private static Object getNoop() {
