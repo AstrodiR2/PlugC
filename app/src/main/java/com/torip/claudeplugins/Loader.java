@@ -264,6 +264,7 @@ public final class Loader {
             r.status = "error";
             r.error = brief(t);
             log(c, dir, "[error] " + t + (t.getCause() != null ? " / " + t.getCause() : ""));
+            log(c, dir, "[trace] " + android.util.Log.getStackTraceString(t));
             if (r.js != null) {
                 try {
                     r.js.close();
