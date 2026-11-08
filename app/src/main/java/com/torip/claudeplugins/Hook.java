@@ -43,6 +43,7 @@ public class Hook implements IXposedHookLoadPackage {
                 protected void afterHookedMethod(MethodHookParam p) {
                     Activity a = (Activity) p.thisObject;
                     activity = new WeakReference<>(a);
+                    Perms.activity = new WeakReference<>(a);
                     try {
                         Loader.startAllOnce(a);
                     } catch (Throwable t) {

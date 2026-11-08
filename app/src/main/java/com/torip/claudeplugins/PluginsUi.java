@@ -1048,6 +1048,62 @@ final class PluginsUi {
         info.addView(detStatus);
         body.addView(info, new LinearLayout.LayoutParams(MP, WC));
 
+        TextView permsLab = tv("Разрешения", 13, DIM, true);
+        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(WC, WC);
+        pl.topMargin = dp(20);
+        pl.bottomMargin = dp(8);
+        pl.leftMargin = dp(4);
+        body.addView(permsLab, pl);
+
+        LinearLayout permsBox = box();
+        for (int pi = 0; pi < Perms.KEYS.length; pi++) {
+            final String key = Perms.KEYS[pi];
+            LinearLayout row = new LinearLayout(a);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            if (pi > 0) row.setPadding(0, dp(10), 0, 0);
+            row.addView(tv(Perms.label(key), 14, TEXT, false),
+                    new LinearLayout.LayoutParams(0, WC, 1f));
+            row.addView(permSeg(p.dir, key), new LinearLayout.LayoutParams(WC, WC));
+            permsBox.addView(row, new LinearLayout.LayoutParams(MP, WC));
+        }
+        body.addView(permsBox, new LinearLayout.LayoutParams(MP, WC));
+
+        LinearLayout.LayoutParams dgl = new LinearLayout.LayoutParams(MP, WC);
+        dgl.topMargin = dp(12);
+        LinearLayout danger = new LinearLayout(a);
+        danger.setOrientation(LinearLayout.HORIZONTAL);
+        danger.setGravity(Gravity.CENTER_VERTICAL);
+        danger.setPadding(dp(16), dp(14), dp(16), dp(14));
+        GradientDrawable dg = new GradientDrawable();
+        dg.setColor(0xFF241412);
+        dg.setCornerRadius(dp(16));
+        dg.setStroke(dp(1), 0xFF4A2320);
+        danger.setBackground(dg);
+        LinearLayout dcol = new LinearLayout(a);
+        dcol.setOrientation(LinearLayout.VERTICAL);
+        dcol.addView(tv("Опасный режим", 15, RED, true));
+        TextView dd = tv("Прямой доступ к классам Claude: java.use, хуки, чтение токена. Видит всё.", 12, SUB, false);
+        dd.setPadding(0, dp(4), 0, 0);
+        dcol.addView(dd);
+        danger.addView(dcol, new LinearLayout.LayoutParams(0, WC, 1f));
+        final Sw dsw = new Sw(a, Perms.dangerEnabled(a, p.dir));
+        dsw.change = () -> {
+            if (dsw.on) {
+                new AlertDialog.Builder(a, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Включить опасный режим?")
+                        .setMessage(p.name + " получит доступ ко всем классам Claude, включая токен и чаты.")
+                        .setCancelable(false)
+                        .setNegativeButton("Отмена", (di, w) -> { dsw.on = false; dsw.prog = 0f; dsw.invalidate(); })
+                        .setPositiveButton("Включить", (di, w) -> Perms.setDanger(a, p.dir, true))
+                        .show();
+            } else {
+                Perms.setDanger(a, p.dir, false);
+            }
+        };
+        danger.addView(dsw, new LinearLayout.LayoutParams(WC, WC));
+        body.addView(danger, dgl);
+
         TextView lab = tv("Лог", 13, DIM, true);
         LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(WC, WC);
         ll.topMargin = dp(20);
@@ -1086,6 +1142,53 @@ final class PluginsUi {
         d0.animate().translationX(0).setDuration(280)
                 .setInterpolator(new DecelerateInterpolator(1.6f)).start();
         refreshDetail();
+    }
+
+    private View permSeg(final String dir, final String key) {
+        final LinearLayout seg = new LinearLayout(a);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.TRANSPARENT);
+        bg.setCornerRadius(dp(10));
+        bg.setStroke(dp(1), 0xFF3A3A38);
+        seg.setBackground(bg);
+        final TextView[] btns = new TextView[3];
+        final String[] modes = {Perms.ALLOW, Perms.ASK, Perms.DENY};
+        final String[] labels = {"Вкл", "Спр", "Выкл"};
+        for (int i = 0; i < 3; i++) {
+            final int idx = i;
+            TextView t = new TextView(a);
+            t.setText(labels[i]);
+            t.setTextSize(11);
+            t.setGravity(Gravity.CENTER);
+            t.setPadding(dp(10), dp(6), dp(10), dp(6));
+            t.setOnClickListener(v -> {
+                Perms.set(a, dir, key, modes[idx]);
+                paintSeg(btns, modes, Perms.get(a, dir, key));
+            });
+            btns[i] = t;
+            seg.addView(t, new LinearLayout.LayoutParams(WC, WC));
+        }
+        paintSeg(btns, modes, Perms.get(a, dir, key));
+        return seg;
+    }
+
+    private void paintSeg(TextView[] btns, String[] modes, String cur) {
+        for (int i = 0; i < btns.length; i++) {
+            if (modes[i].equals(cur)) {
+                int col = Perms.ALLOW.equals(cur) ? GREEN : Perms.DENY.equals(cur) ? RED : ACCENT;
+                GradientDrawable g = new GradientDrawable();
+                g.setColor(col);
+                g.setCornerRadius(dp(8));
+                btns[i].setBackground(g);
+                btns[i].setTextColor(0xFF141414);
+                btns[i].setTypeface(Typeface.DEFAULT_BOLD);
+            } else {
+                btns[i].setBackground(null);
+                btns[i].setTextColor(SUB);
+                btns[i].setTypeface(Typeface.DEFAULT);
+            }
+        }
     }
 
     private void refreshDetail() {
